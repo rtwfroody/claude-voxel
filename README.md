@@ -18,7 +18,7 @@ m.save("tree.vox")
 | file | what |
 | --- | --- |
 | `voxel.py` | the whole toolkit: model, shapes, palette, reader, writer, preview, CLI |
-| `test_voxel.py` | 55 tests; `python3 test_voxel.py` (also runs under pytest) |
+| `test_voxel.py` | 66 tests; `python3 test_voxel.py` (also runs under pytest) |
 | `examples/demo.py` | three worked builds showing the three authoring idioms |
 | `spaceship/` | a modular-spaceship game asset pack built on this library |
 
@@ -164,16 +164,53 @@ assert seated == total
 Probe the **whole** footprint, not a sample: checking the centre column of a
 part gives a confidently wrong answer about whether it is seated.
 
+## Worlds bigger than 256³
+
+A `Model` is capped at 256 voxels per axis, because that is all one
+`SIZE`/`XYZI` pair can address. `Scene` lifts the cap by binning voxels into
+256³ chunks, writing one model per chunk and a scene graph that positions
+them:
+
+```python
+from voxel import Scene
+
+s = Scene()
+for i in range(4):
+    tower = build_tower(i)
+    s.place(tower, offset=(i * 300, 0, 0))
+    del tower                      # the scene copied what it needed
+print(s.save("world.vox"))         # 1024³ is just 64 chunks
+```
+
+`place()` re-interns colors by RGBA, so the models you feed it can carry any
+palette, and it keeps **no reference** to the model — that is the point, so a
+world larger than memory can be built one piece at a time and each piece freed
+as it lands. `voxel()` and `add()` paint straight into the scene.
+
+Coordinates are world coordinates and may be negative; `save()` shifts the
+lowest occupied chunk to chunk `(0,0,0)`. Chunks with nothing in them are never
+written. `bounds`, `size`, `len()` and `chunk_stats()` report on the world.
+
 ## Format notes
 
-Output is version 150 with a flat `MAIN → SIZE / XYZI / RGBA` layout, which is
-the maximally compatible form — every `.vox` loader reads it. The newer
-scene-graph chunks (`nTRN`/`nGRP`/`nSHP`) are not written, so a model is capped
-at 256³ and 255 colors; `save()` raises with the actual size if you exceed it.
+Single models are written as version 150 with a flat
+`MAIN → SIZE / XYZI / RGBA` layout, the maximally compatible form — every
+`.vox` loader reads it. `Model.save()` raises with the actual size if you
+exceed 256 per axis or 255 colors.
 
-`Model.load()` reads back single-model files (and merges multi-model ones,
-ignoring scene-graph transforms) — enough to round-trip our own output, which
-the test suite checks against the real bytes.
+`Scene.save()` adds the scene-graph chunks (`nTRN`/`nGRP`/`nSHP`). Two things
+about them are worth knowing, because both are easy to get subtly wrong:
+
+- A transform's `_t` is the position of the model's **center**, not its minimum
+  corner. The corner lands at `_t - size // 2`, floored.
+- Every chunk is written at the full 256³ `SIZE` even when nearly empty. `SIZE`
+  is 12 fixed bytes and `XYZI` stores only filled voxels, so this is free — and
+  uniform sizes mean a mistake in the center convention slides the whole world
+  instead of tearing chunks apart at their seams.
+
+`Model.load()` reads both layouts, applying scene-graph translations, so
+`Scene.save()` round-trips back to world coordinates. Rotations (`_r`) are
+ignored — we never write one, but foreign files use them freely.
 
 The format's notorious off-by-one is handled in `Palette.chunk_bytes`: entry
 *i* of the 256-entry RGBA table is palette index *i+1*, so index 0 means empty

@@ -43,10 +43,20 @@ Model()                       .voxel(pos,c) .box(a,b,c) .sphere(ctr,r,c)
   io                          .save(path) Model.load(path) Model.from_layers(...)
                               .preview(max_dim=48, ansi=False, views=(...))
 
+Scene()                       .place(model,offset) .voxel(pos,c) .add(coords,c)
+  CHUNK=256                   len() .bounds .size .chunk_stats() .save(path)
+
 shapes.*                      box sphere ellipsoid cylinder cone pyramid torus
                               line where   -- all return set[(x,y,z)]
 transforms                    translate mirror rotate90 scale bounds
 ```
+
+`Scene` is the way past the 256-per-axis cap: it bins world coordinates into
+256³ chunks and writes a multi-model file, so 1024³ is 64 chunks. `place()`
+re-interns colors and keeps **no reference** to the model, so a world can be
+built one piece at a time and each piece freed. `Model.load()` reads it back
+into world coordinates. Use it only when something genuinely exceeds 256 — a
+single `Model` is more compatible and easier to preview.
 
 `hollow=True, thickness=n` on box/sphere/ellipsoid/cylinder. `axis="x"|"y"|"z"`
 on cylinder/cone/pyramid/torus. Colors are names from `NAMED_COLORS`, `"#rrggbb"`,
@@ -88,7 +98,7 @@ object is right. Every bug so far was invisible in it. Run these:
    ```python
    n = sum(1 for p in footprint if (p[0], p[1], surface_z) in m)
    ```
-5. **`python3 test_voxel.py`** after touching `voxel.py` (39 tests).
+5. **`python3 test_voxel.py`** after touching `voxel.py` (66 tests).
 
 For legibility of text or fine detail, project just those voxels rather than
 previewing the whole model:
@@ -114,8 +124,11 @@ cells = {(x,z) for (x,y,z),i in m.voxels.items() if m.palette.rgba(i)==target}
   z-radius >= *n* contains that point and will overwrite it (this hid a candle
   wick). Painting order matters: later `add` wins, `add_under` doesn't.
 - **Limits.** 256 per axis and 255 colors; `save()` raises with the actual size.
-  Solid interiors are fine — give them a distinct color so a cut-away reads
-  correctly rather than showing a uniform blob.
+  Use `Scene` if an object genuinely needs to be bigger; the 255-color limit is
+  global and applies there too. Solid interiors are fine — give them a distinct
+  color so a cut-away reads correctly rather than showing a uniform blob.
+- **`_t` is a center, not a corner.** Anything touching the scene graph has to
+  place a model's minimum corner at `_t - size // 2`. See `notes.md`.
 
 ## Housekeeping
 

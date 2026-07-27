@@ -18,6 +18,15 @@ Shapes are plain sets of (x, y, z) tuples, so set algebra composes them:
     from voxel import shapes
     shell = shapes.sphere((0, 0, 0), 8) - shapes.sphere((0, 0, 0), 6)
     m.add(shell, "glass")
+
+A single model is capped at 256 per axis by the format. Scene bins voxels
+into 256^3 chunks and writes them as a multi-model file, so a world can be
+any size:
+
+    from voxel import Scene
+    s = Scene()
+    s.place(build_tower(), offset=(700, 300, 0))
+    s.save("world.vox")
 """
 
 from __future__ import annotations
@@ -799,10 +808,19 @@ class Model:
 
     @classmethod
     def load(cls, path):
-        """Read a .vox file. Handles the common single-model layout.
+        """Read a .vox file into one flat model. Handles multi-model files.
 
-        Multi-model files are merged with their scene-graph transforms
-        ignored, which is enough for round-tripping our own output.
+        Multi-model files are flattened, honoring the scene graph: each
+        nSHP's model is offset by the nTRN translations accumulated on the
+        way down to it. A file with no scene graph is read at face value,
+        which is our own single-model output and most other writers' too.
+
+        This is what round-trips `Scene.save` back into world coordinates.
+
+        Rotations (`_r`) are ignored. That is free for our own files, which
+        never write one, but foreign files lean on them heavily -- expect a
+        rotated model to land in the right place facing the wrong way. Note
+        that identity is `_r` absent or "4", not 0.
         """
         with open(path, "rb") as f:
             data = f.read()
@@ -811,22 +829,77 @@ class Model:
 
         model = cls()
         rgba = None
+        sizes = []
         xyzi_chunks = []
+        transforms = {}      # nTRN node id -> (child node id, translation)
+        groups = {}          # nGRP node id -> [child node ids]
+        shape_nodes = {}     # nSHP node id -> model index
         for cid, content in _walk_chunks(data, 8):
-            if cid == b"XYZI":
+            if cid == b"SIZE":
+                sizes.append(struct.unpack_from("<iii", content, 0))
+            elif cid == b"XYZI":
                 n = struct.unpack_from("<i", content, 0)[0]
                 xyzi_chunks.append([tuple(content[4 + i * 4:8 + i * 4])
                                     for i in range(n)])
             elif cid == b"RGBA":
                 rgba = [tuple(content[i * 4:i * 4 + 4]) for i in range(256)]
+            elif cid == b"nTRN":
+                node = struct.unpack_from("<i", content, 0)[0]
+                _, off = _read_dict(content, 4)
+                child = struct.unpack_from("<i", content, off)[0]
+                frames = struct.unpack_from("<i", content, off + 12)[0]
+                off += 16
+                shift = (0, 0, 0)
+                for i in range(frames):
+                    frame, off = _read_dict(content, off)
+                    parts = frame.get("_t", "").split()
+                    if i == 0 and len(parts) == 3:
+                        shift = tuple(int(v) for v in parts)
+                transforms[node] = (child, shift)
+            elif cid == b"nGRP":
+                node = struct.unpack_from("<i", content, 0)[0]
+                _, off = _read_dict(content, 4)
+                n = struct.unpack_from("<i", content, off)[0]
+                groups[node] = list(
+                    struct.unpack_from(f"<{n}i", content, off + 4))
+            elif cid == b"nSHP":
+                node = struct.unpack_from("<i", content, 0)[0]
+                _, off = _read_dict(content, 4)
+                if struct.unpack_from("<i", content, off)[0] >= 1:
+                    shape_nodes[node] = struct.unpack_from("<i", content,
+                                                           off + 4)[0]
+
+        # (model index, world position of that model's local origin). The
+        # graph stores each transform as the position of the model's
+        # *center*, so the minimum corner sits at translation - size // 2.
+        placements = []
+        if transforms:
+            stack = [(0, (0, 0, 0))]
+            while stack:
+                node, at = stack.pop()
+                if node in transforms:
+                    child, (dx, dy, dz) = transforms[node]
+                    stack.append((child, (at[0] + dx, at[1] + dy, at[2] + dz)))
+                elif node in groups:
+                    stack.extend((child, at) for child in groups[node])
+                elif node in shape_nodes:
+                    mid = shape_nodes[node]
+                    size = sizes[mid] if mid < len(sizes) else (0, 0, 0)
+                    placements.append(
+                        (mid, tuple(at[i] - size[i] // 2 for i in range(3))))
+            placements.sort()    # model order, so overwrites are deterministic
+        else:
+            placements = [(i, (0, 0, 0)) for i in range(len(xyzi_chunks))]
 
         remap = {}
-        for group in xyzi_chunks:
-            for x, y, z, idx in group:
+        for mid, (ox, oy, oz) in placements:
+            if mid >= len(xyzi_chunks):
+                continue
+            for x, y, z, idx in xyzi_chunks[mid]:
                 if idx not in remap:
                     remap[idx] = (model.palette.index(rgba[idx - 1])
                                   if rgba else model.palette.index(idx))
-                model.voxels[(x, y, z)] = remap[idx]
+                model.voxels[(x + ox, y + oy, z + oz)] = remap[idx]
         return model
 
     # -- preview ------------------------------------------------------------
@@ -932,6 +1005,185 @@ class Model:
 
 
 # --------------------------------------------------------------------------
+# scene -- a world of chunk-sized models, past the 256^3 limit
+# --------------------------------------------------------------------------
+
+class Scene:
+    """A world larger than one model, written as a multi-model .vox file.
+
+    A `Model` is capped at 256 voxels per axis because that is all a single
+    SIZE/XYZI pair can address. A `Scene` bins voxels into 256^3 chunks, one
+    model each, and writes the scene-graph chunks (nTRN/nGRP/nSHP) that
+    position them -- so a 1024^3 world is 64 chunks in one file.
+
+        s = Scene()
+        for i in range(4):
+            tower = build_tower(i)
+            s.place(tower, offset=(i * 300, 0, 0))
+            del tower                      # the scene kept a copy, not a ref
+        print(s.save("world.vox"))
+
+    Coordinates are world coordinates throughout and may be negative; `save`
+    shifts the lowest occupied chunk to chunk (0, 0, 0). Read the result back
+    with `Model.load`, which honors the transforms -- though a world that
+    needed a Scene to write may well be too big to want as one flat Model.
+    """
+
+    CHUNK = 256
+
+    def __init__(self, palette=None):
+        # (ci, cj, ck) -> {(lx, ly, lz): palette index}. Nested dicts rather
+        # than one flat dict of world coordinates: the local keys are what
+        # get written, so nothing has to be re-derived at save time.
+        self.chunks = {}
+        self.palette = palette or Palette()
+
+    def _put(self, x, y, z, idx):
+        """File one world-coordinate voxel into its chunk.
+
+        Python's // and % floor toward negative infinity, which is exactly
+        the binning we want: -1 lands at local 255 of chunk -1.
+        """
+        n = self.CHUNK
+        key = (x // n, y // n, z // n)
+        cell = self.chunks.get(key)
+        if cell is None:
+            cell = self.chunks[key] = {}
+        cell[(x % n, y % n, z % n)] = idx
+
+    # -- placement ----------------------------------------------------------
+
+    def place(self, model, offset=(0, 0, 0)):
+        """Bin `model`'s voxels, shifted by `offset`, into the scene.
+
+        Colors are re-interned by RGBA value, so `model` may carry any
+        palette -- its indices are not assumed to mean anything here.
+
+        No reference to `model` survives the call, which is the point of the
+        design: build a world one piece at a time and drop each piece as
+        soon as it is placed.
+        """
+        ox, oy, oz = offset
+        remap = {}
+        for (x, y, z), idx in model.voxels.items():
+            mine = remap.get(idx)
+            if mine is None:
+                mine = remap[idx] = self.palette.index(model.palette.rgba(idx))
+            self._put(x + ox, y + oy, z + oz, mine)
+        return self
+
+    def add(self, coords, color):
+        """Paint `coords`, in world coordinates, with `color`."""
+        idx = self.palette.index(color)
+        for c in coords:
+            self._put(c[0], c[1], c[2], idx)
+        return self
+
+    def voxel(self, pos, color):
+        return self.add({tuple(pos)}, color)
+
+    # -- queries ------------------------------------------------------------
+
+    def __len__(self):
+        return sum(len(cell) for cell in self.chunks.values())
+
+    @property
+    def bounds(self):
+        """(min_corner, max_corner) in world coordinates, or None if empty."""
+        lo = hi = None
+        n = self.CHUNK
+        for key, cell in self.chunks.items():
+            if not cell:
+                continue
+            xs, ys, zs = zip(*cell)
+            clo = (key[0] * n + min(xs), key[1] * n + min(ys),
+                   key[2] * n + min(zs))
+            chi = (key[0] * n + max(xs), key[1] * n + max(ys),
+                   key[2] * n + max(zs))
+            lo = clo if lo is None else tuple(map(min, lo, clo))
+            hi = chi if hi is None else tuple(map(max, hi, chi))
+        return None if lo is None else (lo, hi)
+
+    @property
+    def size(self):
+        """Extent in voxels along each axis."""
+        b = self.bounds
+        if b is None:
+            return (0, 0, 0)
+        lo, hi = b
+        return tuple(hi[i] - lo[i] + 1 for i in range(3))
+
+    def chunk_stats(self):
+        """Voxel count per occupied chunk, keyed by chunk index."""
+        return {key: len(cell) for key, cell in self.chunks.items() if cell}
+
+    # -- io -----------------------------------------------------------------
+
+    def save(self, path):
+        """Write a multi-model .vox file. Returns a summary string.
+
+        The scene is shifted by *whole chunks* so the lowest occupied chunk
+        becomes chunk (0, 0, 0). A whole-chunk shift leaves every local
+        coordinate alone, so nothing is rebinned -- only the translations
+        written into the scene graph change.
+        """
+        filled = sorted(key for key, cell in self.chunks.items() if cell)
+        if not filled:
+            raise ValueError("refusing to save an empty scene")
+        shift = tuple(-min(key[i] for key in filled) for i in range(3))
+
+        n = self.CHUNK
+        half = n // 2
+        models, nodes, children = [], [], []
+        for k, key in enumerate(filled):
+            cell = self.chunks[key]
+            # Every chunk is written at the full CHUNK^3 size rather than
+            # shrunk to its own bounding box. That is deliberate: with all
+            # sizes equal, the center-vs-corner convention below is either
+            # right for every chunk or wrong for every chunk, so a mistake
+            # slides the whole world uniformly instead of tearing chunks
+            # apart at their seams. SIZE is 12 fixed bytes and XYZI stores
+            # only filled voxels, so it costs nothing.
+            models.append(_chunk(b"SIZE", struct.pack("<iii", n, n, n)))
+            models.append(_chunk(b"XYZI", struct.pack("<i", len(cell))
+                                 + b"".join(bytes((x, y, z, i))
+                                            for (x, y, z), i in cell.items())))
+            # `_t` is the position of the model's *center*, not its minimum
+            # corner: a loader puts the corner at _t - size // 2. So a chunk
+            # whose world minimum corner is (cx, cy, cz) is translated to
+            # (cx + 128, cy + 128, cz + 128).
+            node = 2 + 2 * k
+            children.append(node)
+            trans = " ".join(str((key[i] + shift[i]) * n + half)
+                             for i in range(3))
+            nodes.append(_chunk(b"nTRN",
+                                struct.pack("<i", node) + _dict_bytes({})
+                                + struct.pack("<iiii", node + 1, -1, 0, 1)
+                                + _dict_bytes({"_t": trans})))
+            nodes.append(_chunk(b"nSHP",
+                                struct.pack("<i", node + 1) + _dict_bytes({})
+                                + struct.pack("<ii", 1, k) + _dict_bytes({})))
+
+        # MagicaVoxel wants the root to be an nTRN (node 0, layer -1) over a
+        # single nGRP holding one transform per chunk.
+        root = _chunk(b"nTRN", struct.pack("<i", 0) + _dict_bytes({})
+                      + struct.pack("<iiii", 1, -1, -1, 1)
+                      + _dict_bytes({"_t": "0 0 0"}))
+        group = _chunk(b"nGRP", struct.pack("<i", 1) + _dict_bytes({})
+                       + struct.pack("<i", len(children))
+                       + b"".join(struct.pack("<i", c) for c in children))
+
+        body = b"".join(models + [root, group] + nodes
+                        + [_chunk(b"RGBA", self.palette.chunk_bytes())])
+        data = b"VOX " + struct.pack("<i", 150) + _chunk(b"MAIN", b"", body)
+        with open(path, "wb") as f:
+            f.write(data)
+        return (f"wrote {path}: {len(self)} voxels, size {self.size}, "
+                f"{len(filled)} chunks, {len(self.palette)} colors, "
+                f"{len(data)} bytes")
+
+
+# --------------------------------------------------------------------------
 # .vox chunk plumbing
 # --------------------------------------------------------------------------
 
@@ -950,6 +1202,39 @@ def _walk_chunks(data, offset, end=None):
         kids = offset + 12 + n
         yield from _walk_chunks(data, kids, kids + m)
         offset = kids + m
+
+
+# The scene-graph chunks (nTRN/nGRP/nSHP) carry their attributes as DICTs of
+# STRINGs: an int32 count, then that many key/value pairs, each a int32
+# byte-length followed by UTF-8 bytes.
+
+def _string_bytes(s):
+    raw = s.encode("utf-8")
+    return struct.pack("<i", len(raw)) + raw
+
+
+def _dict_bytes(d):
+    return struct.pack("<i", len(d)) + b"".join(
+        _string_bytes(k) + _string_bytes(v) for k, v in d.items())
+
+
+def _read_string(data, offset):
+    """(text, offset just past it)."""
+    n = struct.unpack_from("<i", data, offset)[0]
+    raw = data[offset + 4:offset + 4 + n]
+    return raw.decode("utf-8", "replace"), offset + 4 + n
+
+
+def _read_dict(data, offset):
+    """(dict of str to str, offset just past it)."""
+    n = struct.unpack_from("<i", data, offset)[0]
+    offset += 4
+    out = {}
+    for _ in range(n):
+        key, offset = _read_string(data, offset)
+        val, offset = _read_string(data, offset)
+        out[key] = val
+    return out, offset
 
 
 # --------------------------------------------------------------------------

@@ -5,7 +5,7 @@ import struct
 import sys
 import tempfile
 
-from voxel import (MAX_DIM, Model, Palette, bounds, mirror, parse_color,
+from voxel import (MAX_DIM, Model, Palette, Scene, bounds, mirror, parse_color,
                    rotate90, scale, shapes, translate, _walk_chunks)
 
 
@@ -486,6 +486,153 @@ def test_preview_downsamples_large_models():
 
 def test_preview_of_empty_model():
     assert Model().preview() == "empty model"
+
+
+# -- scene (multi-model files) ---------------------------------------------
+
+def _scene_shift(s):
+    """The whole-chunk offset that save() applies to a scene."""
+    lo = s.bounds[0]
+    n = Scene.CHUNK
+    return tuple(-(lo[i] // n) * n for i in range(3))
+
+
+def test_scene_round_trips_through_load():
+    """Negative coords and both sides of a chunk boundary survive the graph."""
+    world = {(-1, 0, 0): "red", (0, 0, 0): "blue",
+             (255, 3, 4): "green", (256, 3, 4): "yellow",
+             (-300, -300, -300): "white", (700, 900, 1000): "orange"}
+    s = Scene()
+    for pos, color in world.items():
+        s.voxel(pos, color)
+    path = _tmp()
+    s.save(path)
+    back = Model.load(path)
+
+    dx, dy, dz = _scene_shift(s)
+    expect = {(x + dx, y + dy, z + dz): parse_color(c)
+              for (x, y, z), c in world.items()}
+    assert len(back) == len(expect)
+    assert set(back.voxels) == set(expect)
+    for pos, rgba in expect.items():
+        assert back.palette.rgba(back.voxels[pos]) == rgba, f"color at {pos}"
+
+
+def test_scene_bar_across_a_chunk_boundary_comes_back_contiguous():
+    """The off-by-one that would tear the world lives at x = 255/256."""
+    s = Scene()
+    s.add(shapes.box((250, 0, 0), (261, 0, 0)), "metal")
+    path = _tmp()
+    s.save(path)
+    back = Model.load(path)
+    assert len(back) == 12
+    assert back.size == (12, 1, 1), "no gap and no overlap at the seam"
+    assert back.detached() == set()
+
+
+def test_scene_reinterns_colliding_palette_indices():
+    """Two models both using index 1 for different colors must not merge."""
+    a = Model()
+    a.voxel((0, 0, 0), "red")
+    b = Model()
+    b.voxel((0, 0, 0), "blue")
+    assert a.voxels[(0, 0, 0)] == b.voxels[(0, 0, 0)] == 1
+
+    s = Scene()
+    s.place(a, offset=(0, 0, 0))
+    s.place(b, offset=(300, 0, 0))
+    path = _tmp()
+    s.save(path)
+    back = Model.load(path)
+    assert {back.palette.rgba(i) for i in back.voxels.values()} == {
+        parse_color("red"), parse_color("blue")}
+
+
+def test_scene_place_keeps_no_reference_to_the_model():
+    m = Model()
+    m.voxel((0, 0, 0), "red")
+    s = Scene()
+    s.place(m, offset=(10, 0, 0))
+    m.voxel((1, 0, 0), "blue")          # edited after placing
+    assert len(s) == 1
+
+
+def test_empty_scene_refuses_to_save():
+    try:
+        Scene().save(_tmp())
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("empty scene should not save")
+
+
+def test_scene_writes_every_chunk_at_the_full_size():
+    """Uniform SIZE is what makes a center-convention slip uniform too."""
+    s = Scene()
+    s.voxel((0, 0, 0), "red")
+    s.voxel((1000, 0, 0), "blue")       # one voxel, still a full-size chunk
+    path = _tmp()
+    s.save(path)
+    data = open(path, "rb").read()
+    sizes = [struct.unpack_from("<iii", c, 0)
+             for cid, c in _walk_chunks(data, 8) if cid == b"SIZE"]
+    assert sizes == [(Scene.CHUNK,) * 3] * 2
+
+
+def test_scene_graph_shape_is_what_magicavoxel_expects():
+    s = Scene()
+    s.voxel((0, 0, 0), "red")
+    s.voxel((300, 0, 0), "blue")
+    path = _tmp()
+    s.save(path)
+    chunks = list(_walk_chunks(open(path, "rb").read(), 8))
+    ids = [cid for cid, _ in chunks]
+    assert ids == [b"MAIN", b"SIZE", b"XYZI", b"SIZE", b"XYZI",
+                   b"nTRN", b"nGRP", b"nTRN", b"nSHP", b"nTRN", b"nSHP",
+                   b"RGBA"]
+    trns = [c for cid, c in chunks if cid == b"nTRN"]
+    assert struct.unpack_from("<i", trns[0], 0)[0] == 0, "root is node 0"
+    assert struct.unpack_from("<i", trns[0], 8)[0] == 1, "root -> the group"
+
+
+def test_scene_exceeds_the_single_model_limit():
+    """The whole point: a world wider than 256 that a Model could not save."""
+    s = Scene()
+    s.add({(x, 0, 0) for x in range(0, 1024, 64)}, "stone")
+    path = _tmp()
+    s.save(path)
+    back = Model.load(path)
+    assert back.bounds == ((0, 0, 0), (960, 0, 0))
+    assert len(s.chunk_stats()) == 4, "1024 wide is four chunks"
+
+
+def test_scene_bounds_size_and_chunk_stats_are_world_coordinates():
+    s = Scene()
+    s.voxel((-1, -1, -1), "red")
+    s.voxel((300, 5, 5), "blue")
+    assert s.bounds == ((-1, -1, -1), (300, 5, 5))
+    assert s.size == (302, 7, 7)
+    assert s.chunk_stats() == {(-1, -1, -1): 1, (1, 0, 0): 1}
+    assert len(s) == 2
+
+
+def test_scene_save_shifts_by_whole_chunks_only():
+    """Local coordinates must be untouched, so nothing is rebinned."""
+    s = Scene()
+    s.voxel((-300, 7, 7), "red")        # chunk (-2, 0, 0), local (212, 7, 7)
+    path = _tmp()
+    s.save(path)
+    back = Model.load(path)
+    assert list(back.voxels) == [(212, 7, 7)], "chunk -2 became chunk 0"
+
+
+def test_load_ignores_the_scene_graph_when_there_is_none():
+    """Regression: a flat single-model file is still read at face value."""
+    m = Model()
+    m.box((0, 0, 0), (3, 3, 3), "red")
+    path = _tmp()
+    m.save(path)
+    assert set(Model.load(path).voxels) == set(m.voxels)
 
 
 # -- runner ----------------------------------------------------------------
