@@ -1,0 +1,180 @@
+# voxel.py
+
+Author MagicaVoxel `.vox` files from Python. Single file, no dependencies,
+stdlib only.
+
+```python
+from voxel import Model
+
+m = Model()
+m.cylinder((0, 0, 0), 2, 14, "wood")
+m.sphere((0, 0, 20), 8, "leaf")
+print(m.preview())          # check it in the terminal
+m.save("tree.vox")
+```
+
+## Layout
+
+| file | what |
+| --- | --- |
+| `voxel.py` | the whole toolkit: model, shapes, palette, reader, writer, preview, CLI |
+| `test_voxel.py` | 55 tests; `python3 test_voxel.py` (also runs under pytest) |
+| `examples/demo.py` | three worked builds showing the three authoring idioms |
+| `spaceship/` | a modular-spaceship game asset pack built on this library |
+
+## Coordinates
+
+Right-handed, **Z up**, matching MagicaVoxel: `+X` right, `+Y` away from the
+viewer, `+Z` up.
+
+Models are sparse and accept **negative coordinates** while you build, so you
+can centre things on the origin and build symmetric objects around `x = 0`.
+`save()` shifts the min corner to the file origin and enforces the format's
+256-per-axis limit.
+
+## The three idioms
+
+**1. Primitives.** `box sphere ellipsoid cylinder cone frustum pyramid torus
+wedge polygon helix line voxel`, each taking a color as the last positional
+argument:
+
+```python
+m.box((-8, -8, -10), (8, 8, -8), "stone")
+m.cone((0, 0, 0), 6, 12, "red", axis="z")
+m.add_under(shapes.sphere((0, 0, 20), 8), "leaf")   # only fill empty space
+```
+
+Four of these carry more weight than the rest when you are building something
+that isn't made of blocks:
+
+```python
+m.frustum((0, 0, 0), 6, 10, "metal", top_radius=3)   # taper, not a full cone
+m.wedge((-4, 0, 0), (4, 20, 6), "hull", axis="y", taper="z")   # ramp / nose
+m.helix((0, 0, 0), 5, 20, "copper", turns=4, thickness=2)      # coil
+```
+
+`polygon` extrudes a closed 2D outline, which beats stacking boxes for
+anything with a swept profile — draw the plan view, extrude it:
+
+```python
+plan = [(0, -16), (3, -6), (6, 8), (0, 10)]         # (x, y) pairs
+m.polygon(plan, -1, 3, "hull")                      # 3 layers, from z = -1
+```
+
+Fill is even-odd and the outline is always kept, so a spike thinner than a
+voxel still survives.
+
+**2. Set algebra.** Everything in `shapes.*` returns a plain `set` of
+`(x, y, z)` tuples, so `|`, `-` and `&` compose them before you paint:
+
+```python
+from voxel import shapes
+shell = shapes.sphere((0, 0, 0), 8) - shapes.sphere((0, 0, 0), 6)
+m.add(shell, "glass")
+m.remove(shapes.cylinder((0, 0, -10), 2, 20))       # drill a hole
+```
+
+`shapes.where(a, b, predicate)` is the escape hatch for anything else:
+
+```python
+m.add(shapes.where((-20, -20, 0), (20, 20, 0),
+                   lambda x, y, z: (x * x + y * y) % 7 < 2), "sand")
+```
+
+Transforms on coordinate sets: `translate mirror rotate90 scale bounds`. The
+model carries its own colored versions — `m.translate() m.rotate90() m.scale()
+m.mirror() m.center()` — so you can build a part once and orient copies of it:
+
+```python
+gun = build_gun()                       # points along -y
+m.merge(gun.copy().rotate90("z", 1), offset=(10, 0, 0))   # now points along -x
+```
+
+`m.recolor(old, new)` repaints one color throughout, which is how one mesh
+becomes a whole faction's worth of variants.
+
+`m.surface()` returns the voxels with an exposed face, optionally filtered to
+one direction, for skinning a solid shape:
+
+```python
+m.add(m.surface("z+"), "light_grey")    # top-lit highlight
+m.add(m.surface("z-"), "dark_grey")     # underside shadow
+```
+
+**3. ASCII layers.** One string per Z layer, bottom first. Within a layer the
+first text row is the **highest Y**, so each layer reads as a top-down plan:
+
+```python
+Model.from_layers(["wwwww\nw...w\nwwwww", "..r..\n.rrr.\n..r.."],
+                  {"w": "sand", "r": "dark_red"})
+```
+
+Use `.` for empty, not spaces — leading/trailing blank lines are trimmed, so a
+row of spaces would shift the geometry. Unmapped characters raise rather than
+being silently skipped.
+
+## Symmetry
+
+`Model.mirror(axis, at)` reflects the model and keeps both halves — build one
+side of a creature or vehicle and the halves can't drift apart.
+
+One gotcha: column `at` is its own mirror image, so parts meant to cross the
+centreline must start **at** the mirror plane. Building at `x >= 1` and
+mirroring across `x = 0` leaves a one-voxel seam down the middle.
+
+## Preview
+
+`m.preview()` prints orthographic front/side/top projections with a color
+legend, downsampling to `max_dim` for large models. `preview(ansi=True)` gives
+truecolor blocks. There's a CLI for files:
+
+```sh
+python3 voxel.py preview examples/robot.vox --ansi
+python3 voxel.py info examples/robot.vox
+```
+
+## Connectivity
+
+Assembled models fail by having a part float away from what it should rest on,
+which is invisible in the voxel count and easy to miss in a projection.
+
+```python
+assert m.detached() == set()      # empty means one solid piece
+m.components()                    # connected components, largest first
+```
+
+```sh
+python3 voxel.py check examples/omri_cake.vox   # exit 1 and a report if not
+```
+
+`detached()` floods from the lowest voxel (the base, for anything standing on
+a plate) using **face adjacency**, so parts meeting only at an edge or corner
+count as detached.
+
+It answers "is anything floating free?", which is narrower than it sounds: a
+part perched on a stray decoration is connected, and passes. For "does this
+rest on what I meant", use `support()`, which counts how many of a footprint's
+voxels actually have something under them:
+
+```python
+seated, total = m.support(footprint)        # offset defaults to (0, 0, -1)
+assert seated == total
+```
+
+Probe the **whole** footprint, not a sample: checking the centre column of a
+part gives a confidently wrong answer about whether it is seated.
+
+## Format notes
+
+Output is version 150 with a flat `MAIN → SIZE / XYZI / RGBA` layout, which is
+the maximally compatible form — every `.vox` loader reads it. The newer
+scene-graph chunks (`nTRN`/`nGRP`/`nSHP`) are not written, so a model is capped
+at 256³ and 255 colors; `save()` raises with the actual size if you exceed it.
+
+`Model.load()` reads back single-model files (and merges multi-model ones,
+ignoring scene-graph transforms) — enough to round-trip our own output, which
+the test suite checks against the real bytes.
+
+The format's notorious off-by-one is handled in `Palette.chunk_bytes`: entry
+*i* of the 256-entry RGBA table is palette index *i+1*, so index 0 means empty
+and the last table slot is unreachable padding.
