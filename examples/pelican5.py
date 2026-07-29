@@ -163,7 +163,7 @@ POUCH_HW = [(-44, 1.4), (-36, 2.6), (-29, 3.8), (-22, 4.6),
 # A brown pelican's tail is short but SQUARED -- a stubby fan, not a point.
 # Tapering it to 3.4 made two independent blind viewers report "there is no
 # tail" / "a truncated stub".
-TAIL_HW = [(52, 8.0), (58, 8.0), (63, 7.6), (66, 6.8)]
+TAIL_HW = [(52, 4.4), (56, 6.6), (60, 7.6), (63, 7.6), (66, 6.8)]
 TAIL_Z = [(52, 3.0), (58, 2.6), (63, 2.2), (66, 2.0)]
 TAIL_HH = [(52, 2.6), (58, 2.2), (63, 1.8), (66, 1.4)]
 RECTRIX_COUNT = 4        # notches in the tail's trailing edge, so it reads
@@ -183,8 +183,8 @@ WING_ROOT_F = 0.20       # inboard of this the reference measured body, not wing
 
 # MEASURED: chord as a fraction of half-span, by span fraction |x|/HALF_SPAN
 CHORD = [(0.20, 0.279), (0.30, 0.247), (0.40, 0.235), (0.50, 0.232),
-         (0.60, 0.201), (0.70, 0.186), (0.80, 0.164), (0.90, 0.141),
-         (1.00, 0.010)]
+         (0.60, 0.201), (0.70, 0.186), (0.80, 0.164), (0.90, 0.145),
+         (0.96, 0.120), (1.00, 0.075)]
 # Leading edge, aft-positive.  MEASURED from the reference masks: sweep rises
 # quickly over the arm to the wrist and then PLATEAUS, so the hand runs almost
 # straight out.  Total root-to-tip sweep is only ~10 voxels at this half-span.
@@ -197,9 +197,9 @@ CHORD = [(0.20, 0.279), (0.30, 0.247), (0.40, 0.235), (0.50, 0.232),
 LEAD = [(0.20, -2.0), (0.30, 3.0), (0.40, 6.0), (0.50, 8.5),
         (0.60, 10.0), (0.70, 11.0), (0.85, 10.5), (1.00, 9.0)]
 # a shallow arch: soaring brown pelicans glide on nearly flat wings
-ARCH = [(0.20, 6.0), (0.40, 8.5), (0.60, 10.0), (0.80, 9.5), (1.00, 8.0)]
-THICK = [(0.20, 5.8), (0.30, 4.4), (0.45, 3.2), (0.60, 2.4),
-         (0.80, 1.5), (1.00, 0.6)]
+ARCH = [(0.20, 4.0), (0.40, 7.5), (0.60, 9.0), (0.80, 8.5), (1.00, 7.0)]
+THICK = [(0.20, 4.6), (0.30, 3.9), (0.45, 3.1), (0.60, 2.5),
+         (0.80, 1.8), (1.00, 1.0)]
 
 FINGER_F = 0.78          # span fraction where the primaries separate
 FINGER_COUNT = 5
@@ -216,6 +216,7 @@ NAPE_HW = 4              # chestnut stripe half-width CAP -- MUST stay narrow
 NAPE_FLANK = 3           # voxels of head colour left outboard on each side
 NAPE_Y0, NAPE_Y1 = -10, 2
 MANTLE_Z = 4.0
+DORSAL_Y0 = -2           # dorsal colours start aft of the neck junction
 
 
 def interp(table, t):
@@ -470,7 +471,10 @@ def build():
     # single flat mass -- the exact complaint this build exists to fix, just
     # displaced from the wings onto the body.
     for (x, y, z) in body | neck | shoulder:
-        if z >= MANTLE_Z:
+        if y < DORSAL_Y0:
+            # throat and breast: never dorsal colours, however high they sit
+            c = FORENECK if z >= 5 else BREAST
+        elif z >= MANTLE_Z:
             if y >= 40:
                 c = RUMP
             elif y >= 24:
@@ -692,6 +696,39 @@ def check(m):
     print(f"[{'ok' if e else 'FAIL'}] chestnut stays behind the face: "
           f"{len(fore)} voxels forward of y={HEAD_C[1] - HEAD_R[1]:.0f}")
     ok &= e
+
+    # Dorsal colours must not wrap onto the throat/breast.  70 voxels of pale
+    # mantle sat on the front of the bird before DORSAL_Y0 existed, visible
+    # head-on -- the same unclamped-region bug class as the chestnut saddle.
+    dorsal_cols = {pc(MANTLE), pc(SCAPULAR), pc(RUMP)}
+    # NB: inside check() the model is in-memory, so m.voxels keys are already
+    # BUILD coordinates -- adding `lo` (as one would for a loaded file) shifts
+    # everything by 50 and made both of these checks fail on a correct build.
+    leak = [p for p, i in m.voxels.items()
+            if m.palette.rgba(i) in dorsal_cols and p[1] < DORSAL_Y0]
+    h = not leak
+    print(f"[{'ok' if h else 'FAIL'}] dorsal colours stay aft of the neck "
+          f"(y>={DORSAL_Y0}): {len(leak)} voxels on the breast")
+    ok &= h
+
+    # The back must DOME above the wing plane.  When the root arch plus root
+    # thickness put the wing's top level with the body's, the whole span rendered
+    # as one flat deck and three independent viewers called it "crossed planks".
+    tops = {}
+    for (x, y, z) in m.coords():
+        if (x, y) not in tops or z > tops[(x, y)]:
+            tops[(x, y)] = z
+    domes = []
+    for y in range(6, 24, 2):
+        col = [tops.get((x, y)) for x in range(0, WING_X0 + 10)]
+        col = [v for v in col if v is not None]
+        if len(col) > WING_X0:
+            domes.append(col[0] - min(col))
+    dome = min(domes) if domes else 0
+    i2 = dome >= 2
+    print(f"[{'ok' if i2 else 'FAIL'}] back domes above the wing plane: "
+          f"{dome} voxels at the shallowest station (want >=2)")
+    ok &= i2
 
     # Primary fingering: the slots are notches in the TRAILING edge, not holes
     # in the middle of the wing, so count local minima along the hand.  An
