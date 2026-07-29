@@ -51,7 +51,7 @@ the directory containing `voxel.py`.
 | directory | what |
 | --- | --- |
 | `seattle_center/` | a 1024³ post-apocalyptic Seattle Center; multi-million voxels, a ~15 MB `.vox`, and its own `devscripts/`. Build with `python3 -m playground.seattle_center.build`. Watch memory — it is built to a ~7M voxel ceiling. |
-| `spaceship/` | a modular-spaceship game asset pack: hulls, systems and enemies that snap together on sockets. `python3 spaceship/build_all.py`. |
+| `spaceship/` | a modular-spaceship game asset pack: hulls, systems and enemies that snap together on sockets. `python3 playground/spaceship/build_all.py`. |
 
 ## Promoting to `examples/`
 
