@@ -47,7 +47,8 @@ Scene()                       .place(model,offset) .voxel(pos,c) .add(coords,c)
   CHUNK=256                   len() .bounds .size .chunk_stats() .save(path)
 
 shapes.*                      box sphere ellipsoid cylinder cone pyramid torus
-                              line where   -- all return set[(x,y,z)]
+                              line where silhouette_hull(front,side,top)
+                              -- all return set[(x,y,z)]
 transforms                    translate mirror rotate90 scale bounds
 ```
 

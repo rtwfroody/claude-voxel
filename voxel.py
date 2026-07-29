@@ -410,6 +410,100 @@ class shapes:
         return out
 
     @staticmethod
+    def _mask_cells(mask, view):
+        """Parse one silhouette mask into (cells, width, height).
+
+        Cells are (column, row) with row 0 at the *bottom*, matching the way
+        preview() prints the highest row first.
+        """
+        rows = mask.splitlines() if isinstance(mask, str) else list(mask)
+        # Trim only the blank lines triple-quoting adds at the ends; a row of
+        # dots is a real empty row.
+        while rows and not rows[0].strip():
+            rows.pop(0)
+        while rows and not rows[-1].strip():
+            rows.pop()
+        if not rows:
+            raise ValueError(f"the {view} mask has no rows")
+        height = len(rows)
+        width = max(len(r) for r in rows)
+        cells = {(col, height - 1 - i)
+                 for i, row in enumerate(rows)
+                 for col, ch in enumerate(row) if ch not in ". "}
+        return cells, width, height
+
+    @staticmethod
+    def silhouette_hull(front=None, side=None, top=None):
+        """Voxels whose projections match every given silhouette mask.
+
+        The visual hull of two or three orthographic drawings: draw what the
+        thing looks like from the front, the side and above, and keep the
+        solid that casts all of those shadows. Masks read exactly like
+        `preview()` output -- front is x right and z up, side is y right and
+        z up, top is x right and +y at the top -- so a drawing and a preview
+        of the result are directly comparable.
+
+        Each mask is a list of rows or one multiline string. '.' and ' ' are
+        empty, every other character is filled, and short rows pad on the
+        right. The hull is anchored at the origin: the leftmost column is 0,
+        the bottom text row is 0.
+
+        Two masks are the minimum; a single one leaves an axis unbounded.
+        Views that define the same extent must agree on it.
+        """
+        masks = {}
+        for view, mask in (("front", front), ("side", side), ("top", top)):
+            if mask is not None:
+                masks[view] = shapes._mask_cells(mask, view)
+        if len(masks) < 2:
+            raise ValueError(
+                "silhouette_hull needs at least two masks; one on its own "
+                "leaves the third axis unbounded"
+            )
+
+        # (view, what it measures, size) for every view that pins an axis.
+        for axis, claims in (
+                ("x", [("front", "columns", 1), ("top", "columns", 1)]),
+                ("y", [("side", "columns", 1), ("top", "rows", 2)]),
+                ("z", [("front", "rows", 2), ("side", "rows", 2)])):
+            claims = [(v, what, masks[v][i]) for v, what, i in claims
+                      if v in masks]
+            for v, what, n in claims[1:]:
+                v0, what0, n0 = claims[0]
+                if n != n0:
+                    raise ValueError(f"{v0} is {n0} {what0} ({axis}) but "
+                                     f"{v} is {n} {what}")
+
+        f = masks.get("front")     # cells are (x, z)
+        s = masks.get("side")      # cells are (y, z)
+        t = masks.get("top")       # cells are (x, y)
+
+        out = set()
+        if f is not None and s is not None:
+            by_z = {}
+            for y, z in s[0]:
+                by_z.setdefault(z, []).append(y)
+            for x, z in f[0]:
+                for y in by_z.get(z, ()):
+                    if t is None or (x, y) in t[0]:
+                        out.add((x, y, z))
+        elif f is not None:                     # front + top
+            by_x = {}
+            for x, y in t[0]:
+                by_x.setdefault(x, []).append(y)
+            for x, z in f[0]:
+                for y in by_x.get(x, ()):
+                    out.add((x, y, z))
+        else:                                   # side + top
+            by_y = {}
+            for x, y in t[0]:
+                by_y.setdefault(y, []).append(x)
+            for y, z in s[0]:
+                for x in by_y.get(y, ()):
+                    out.add((x, y, z))
+        return out
+
+    @staticmethod
     def where(a, b, predicate):
         """Every coordinate in the box `a`..`b` for which predicate(x,y,z) is true.
 

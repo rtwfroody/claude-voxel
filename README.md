@@ -113,6 +113,28 @@ Use `.` for empty, not spaces — leading/trailing blank lines are trimmed, so a
 row of spaces would shift the geometry. Unmapped characters raise rather than
 being silently skipped.
 
+## Silhouettes
+
+`shapes.silhouette_hull` goes the other way from `preview()`: draw two or
+three orthographic masks and it keeps the solid that casts all of those
+shadows.
+
+```python
+front = ["..##..", ".####.", "######", "######", "######"]   # x right, z up
+side = ["..##..", ".####.", "######", "######", "######"]    # y right, z up
+m.add(shapes.silhouette_hull(front=front, side=side), "wood")  # hipped roof
+```
+
+The masks read exactly like `preview()` output — front is x right and z up,
+side is y right and z up, top is x right with **+y in the first row** — so a
+drawing and a preview of what it built are directly comparable. `.` and space
+are empty, rows may be ragged, and the hull is anchored at the origin.
+
+Two masks are the minimum; one on its own leaves an axis unbounded. Views that
+pin the same extent (front and top both give x) must agree on it or it raises.
+The result is the *largest* solid matching every drawing, so an interior drawn
+hollow in two views leaves only the corners where the two fills overlap.
+
 ## Symmetry
 
 `Model.mirror(axis, at)` reflects the model and keeps both halves — build one

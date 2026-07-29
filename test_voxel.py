@@ -233,6 +233,111 @@ def test_helix_winds_around_its_axis():
     assert (0, 0, 10) not in h, "hollow in the middle"
 
 
+# -- silhouette hull -------------------------------------------------------
+
+def test_silhouette_hull_of_three_squares_is_a_box():
+    n = 5
+    square = ["#" * n] * n
+    hull = shapes.silhouette_hull(front=square, side=square, top=square)
+    assert hull == shapes.box((0, 0, 0), (n - 1, n - 1, n - 1))
+
+
+def test_silhouette_hull_extrudes_a_drawn_circle():
+    """A circle on top plus full front and side masks is a cylinder."""
+    top = ["..###..",
+           ".#####.",
+           "#######",
+           "#######",
+           "#######",
+           ".#####.",
+           "..###.."]
+    height = 5
+    rect = ["#" * 7] * height
+    hull = shapes.silhouette_hull(front=rect, side=rect, top=top)
+
+    circle = {(x, len(top) - 1 - i)
+              for i, row in enumerate(top)
+              for x, ch in enumerate(row) if ch != "."}
+    assert hull == {(x, y, z) for x, y in circle for z in range(height)}
+
+
+def test_silhouette_hull_front_notch_lands_top_left():
+    """Regression: row 0 is the highest z and column 0 is the lowest x."""
+    n = 4
+    full = ["#" * n] * n
+    notched = ["." + "#" * (n - 1)] + ["#" * n] * (n - 1)
+    hull = shapes.silhouette_hull(front=notched, side=full, top=full)
+    box = shapes.box((0, 0, 0), (n - 1, n - 1, n - 1))
+    assert box - hull == {(0, y, n - 1) for y in range(n)}
+
+
+def test_silhouette_hull_top_notch_lands_at_max_y():
+    """Regression: the top mask's first text row is the highest y."""
+    n = 4
+    full = ["#" * n] * n
+    notched = ["." + "#" * (n - 1)] + ["#" * n] * (n - 1)
+    hull = shapes.silhouette_hull(front=full, side=full, top=notched)
+    box = shapes.box((0, 0, 0), (n - 1, n - 1, n - 1))
+    assert box - hull == {(0, n - 1, z) for z in range(n)}
+
+
+def test_silhouette_hull_from_two_masks():
+    front = [".#.",
+             "###"]
+    side = ["##",
+            "##"]
+    hull = shapes.silhouette_hull(front=front, side=side)
+    face = {(1, 1), (0, 0), (1, 0), (2, 0)}          # (x, z)
+    assert hull == {(x, y, z) for x, z in face for y in range(2)}
+    lo, hi = bounds(hull)
+    assert (lo, hi) == ((0, 0, 0), (2, 1, 1)), "y extent comes from side"
+
+
+def test_silhouette_hull_rejects_disagreeing_extents():
+    try:
+        shapes.silhouette_hull(front=["####"] * 3, top=["###"] * 3)
+    except ValueError as e:
+        assert "front" in str(e) and "top" in str(e)
+        assert "4" in str(e) and "3" in str(e)
+    else:
+        assert False, "mismatched x extents must raise"
+
+
+def test_silhouette_hull_needs_two_masks():
+    try:
+        shapes.silhouette_hull(front=["##", "##"])
+    except ValueError as e:
+        assert "two" in str(e)
+    else:
+        assert False, "one mask leaves an axis unbounded"
+
+
+def test_silhouette_hull_accepts_a_multiline_string():
+    rows = [".##.", "####", "####"]
+    assert (shapes.silhouette_hull(front="\n".join(rows), side="\n".join(rows))
+            == shapes.silhouette_hull(front=rows, side=rows))
+
+
+def test_silhouette_hull_front_mask_matches_its_preview():
+    """The drawing and preview() must agree cell for cell."""
+    front = [".##.",         # asymmetric both ways, so a flipped mask shows
+             "####",
+             "####",
+             "#..."]
+    m = Model()
+    m.add(shapes.silhouette_hull(front=front, side=["#" * 4] * 4), "red")
+
+    lines = m.preview(max_dim=64, views=("front",)).splitlines()
+    block = lines[1:lines.index("", 1)]
+    shown = {(c, len(block) - 1 - i)
+             for i, row in enumerate(block)
+             for c, ch in enumerate(row) if ch != " "}
+    drawn = {(c, len(front) - 1 - i)
+             for i, row in enumerate(front)
+             for c, ch in enumerate(row) if ch != "."}
+    assert shown == drawn
+
+
 # -- transforms ------------------------------------------------------------
 
 def test_translate_and_mirror():
