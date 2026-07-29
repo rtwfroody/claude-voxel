@@ -137,11 +137,22 @@ POUCH_FLOOR = [(-48, 1.4), (-40, 2.8), (-33, 4.6), (-26, 6.6),
 POUCH_HW = [(-48, 1.4), (-40, 2.6), (-33, 3.8), (-26, 4.6),
             (-20, 4.9), (-14, 4.6)]
 
-TAIL_HW = [(52, 8.0), (58, 7.0), (62, 5.6), (66, 3.4)]
+# A brown pelican's tail is short but SQUARED -- a stubby fan, not a point.
+# Tapering it to 3.4 made two independent blind viewers report "there is no
+# tail" / "a truncated stub".
+TAIL_HW = [(52, 8.0), (58, 8.0), (63, 7.6), (66, 6.8)]
 TAIL_Z = [(52, 3.0), (58, 2.6), (63, 2.2), (66, 2.0)]
-TAIL_HH = [(52, 2.6), (58, 2.0), (62, 1.4), (66, 1.0)]   # thins toward the tip
+TAIL_HH = [(52, 2.6), (58, 2.2), (63, 1.8), (66, 1.4)]
+RECTRIX_COUNT = 4        # notches in the tail's trailing edge, so it reads
+RECTRIX_DEPTH = 3        # as separate feathers rather than one slab
 
 FOOT_Y0, FOOT_Y1 = 46, 60
+
+# Fillet blending the body's dorsal surface out onto the wing root.  Without it
+# the wing is a flat plate meeting a 24-deep torso with a hard one-voxel step,
+# which both blind viewers called "panels bolted on" / "sheet metal".
+SHOULDER_SPAN = 20       # voxels of span over which the fillet fades out
+SHOULDER_BLEND = 0.72    # how much of the body/wing height gap it closes
 
 # ---------------------------------------------------------------- wing
 WING_X0 = 8              # embedded in the flank, so the wing cannot detach
@@ -169,7 +180,7 @@ THICK = [(0.20, 5.2), (0.30, 3.8), (0.45, 2.6), (0.60, 1.9),
 
 FINGER_F = 0.78          # span fraction where the primaries separate
 FINGER_COUNT = 5
-FINGER_GAP = 0.55        # fraction of chord removed in a slot
+FINGER_GAP = 0.62        # fraction of chord removed in a slot
 
 # region boundaries, as fractions -- one number each so they can be retuned
 COVERT_CHORD_END = 0.38  # coverts occupy the leading part of the arm
@@ -289,6 +300,56 @@ def tail_coords():
             iw = int(round(w))
             for x in range(-iw, iw + 1):
                 out.add((x, y, z))
+    # Notch the trailing edge into separate rectrices.  A squared fan with a
+    # single flat rear face reads as a slab that "stops mid-form".
+    hw_tip = interp(TAIL_HW, TAIL_Y1)
+    for k in range(1, RECTRIX_COUNT + 1):
+        xc = -hw_tip + 2.0 * hw_tip * k / (RECTRIX_COUNT + 1)
+        for dx in (-0.5, 0.5):
+            x = int(round(xc + dx))
+            for d in range(RECTRIX_DEPTH):
+                out -= {(x, TAIL_Y1 - d, z) for z in range(-8, 12)}
+    return out
+
+
+def shoulder_coords(wing, body):
+    """Fillet from the body's dorsal surface out onto the wing root."""
+    wtop = {}
+    for (x, y, z) in wing:
+        k = (x, y)
+        if k not in wtop or z > wtop[k]:
+            wtop[k] = z
+    # The body's top per COLUMN, not per section.  Targeting the section's
+    # centreline height instead lifted the fillet to the body's peak right at the
+    # flank, which replaced the step it was meant to remove with a 3-voxel ridge:
+    # a torso section is an ellipse, so its surface curves down toward the sides.
+    btop = {}
+    for (x, y, z) in body:
+        k = (abs(x), y)
+        if k not in btop or z > btop[k]:
+            btop[k] = z
+    # Direction matters: at the flank the WING ROOT sits above the body's
+    # surface, because a torso section curves down toward its sides while the
+    # wing leaves at a constant height.  So the blend lifts the body's shoulder
+    # up to meet the wing -- a scapular bulge -- rather than dropping the wing.
+    out = set()
+    root = {}
+    for (ax, y), z in wtop.items():
+        if ax == WING_X0 and (y not in root or z > root[y]):
+            root[y] = z
+    for y, wz in root.items():
+        for k in range(1, SHOULDER_SPAN + 1):
+            bx = WING_X0 - k
+            if bx < 0:
+                break
+            bz = btop.get((bx, y))
+            if bz is None or bz >= wz:
+                continue
+            t = 1.0 - k / (SHOULDER_SPAN + 1.0)
+            target = bz + (wz - bz) * (t ** 1.5) * SHOULDER_BLEND
+            for z in range(bz + 1, int(round(target)) + 1):
+                out.add((bx, y, z))
+                out.add((-bx, y, z))
     return out
 
 
@@ -357,7 +418,7 @@ def fingered_out(f, c, x):
     phase = k * FINGER_COUNT
     frac = phase - math.floor(phase)
     # a narrow slot at each feather boundary, trailing portion only
-    return frac < 0.22 and c > (1.0 - FINGER_GAP)
+    return frac < 0.27 and c > (1.0 - FINGER_GAP)
 
 
 def build():
@@ -375,16 +436,17 @@ def build():
     tail = tail_coords()
     feet = foot_coords()
     wing = wing_geometry()
+    shoulder = shoulder_coords(wing, body)
 
     # ---- base coats, coarse to fine (later add wins) -------------------
-    m.add(body | neck | tail, CORE)
+    m.add(body | neck | tail | shoulder, CORE)
 
     # body: upper surface is mantle, lower is breast/belly, aft is rump
     # The dorsal surface darkens from the pale mantle at the shoulders back to
     # the rump.  Round 0 painted the whole back one pale tone, which read as a
     # single flat mass -- the exact complaint this build exists to fix, just
     # displaced from the wings onto the body.
-    for (x, y, z) in body | neck:
+    for (x, y, z) in body | neck | shoulder:
         if z >= MANTLE_Z:
             if y >= 40:
                 c = RUMP
