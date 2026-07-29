@@ -67,7 +67,9 @@ BREAST          = "#45403a"
 BELLY           = "#1a1815"   # measured #110f0f chroma 2
 FLANK           = "#2a2620"
 UNDERTAIL       = "#221f1b"
-TAIL_DARK       = "#22201c"   # measured #181715 chroma 3
+TAIL_DARK       = "#2e2a25"   # measured #181715, lifted: at #22201c it was
+                              # indistinguishable from the rump and read as no tail
+TAIL_EDGE       = "#5a544c"   # pale feather tips, so the tail has an outline
 HEAD_WHITE      = "#e8e6e0"   # measured foreneck #dcdad5 chroma 7
 CROWN_YELLOW    = "#d9c69a"   # measured #d1c2af chroma 34, pushed warmer
 HINDNECK        = "#5e3826"   # narrow nape stripe ONLY -- see NAPE_FLANK
@@ -132,8 +134,8 @@ POUCH_FLOOR = [(-48, 1.4), (-40, 2.8), (-33, 4.6), (-26, 6.6),
                (-20, 8.2), (-14, 8.8)]
 # Kept narrower than the head's half-width (5.6) so the pouch reads as slung
 # under the bill rather than as a second head.
-POUCH_HW = [(-48, 1.4), (-40, 2.2), (-33, 3.0), (-26, 3.6),
-            (-20, 3.8), (-14, 3.6)]
+POUCH_HW = [(-48, 1.4), (-40, 2.6), (-33, 3.8), (-26, 4.6),
+            (-20, 4.9), (-14, 4.6)]
 
 TAIL_HW = [(52, 8.0), (58, 7.0), (62, 5.6), (66, 3.4)]
 TAIL_Z = [(52, 3.0), (58, 2.6), (63, 2.2), (66, 2.0)]
@@ -162,7 +164,8 @@ LEAD = [(0.20, -2.0), (0.30, 3.0), (0.40, 6.0), (0.50, 8.5),
         (0.60, 10.0), (0.70, 11.0), (0.85, 10.5), (1.00, 9.0)]
 # a shallow arch: soaring brown pelicans glide on nearly flat wings
 ARCH = [(0.20, 6.0), (0.40, 8.5), (0.60, 10.0), (0.80, 9.5), (1.00, 8.0)]
-THICK = [(0.20, 3.0), (0.40, 2.0), (0.60, 1.5), (0.80, 1.0), (1.00, 0.5)]
+THICK = [(0.20, 5.2), (0.30, 3.8), (0.45, 2.6), (0.60, 1.9),
+         (0.80, 1.1), (1.00, 0.5)]
 
 FINGER_F = 0.78          # span fraction where the primaries separate
 FINGER_COUNT = 5
@@ -172,6 +175,7 @@ FINGER_GAP = 0.55        # fraction of chord removed in a slot
 COVERT_CHORD_END = 0.38  # coverts occupy the leading part of the arm
 TERTIAL_F_END = 0.26
 ARM_F_END = 0.55         # outboard of this is the hand (primaries)
+SEAM_TILT = 0.13         # tilts the arm/hand seam so it is not radial
 PCOV_CHORD_END = 0.32
 UCOV_CHORD_END = 0.52
 NAPE_HW = 4              # chestnut stripe half-width CAP -- MUST stay narrow
@@ -257,8 +261,12 @@ def pouch_coords():
         for z in range(int(math.floor(bot)), int(math.ceil(top)) + 1):
             span = top - bot
             t = (z - bot) / span if span > 0 else 1.0
-            w = hw * math.sqrt(max(0.0, 1.0 - (1.0 - t) ** 2 * 0.85))
-            iw = int(round(w))
+            # Widest in the middle and rounded at the bottom, so the pouch is a
+            # SACK.  The previous profile tapered monotonically to the floor and
+            # rendered as a thin blade -- a blind viewer called it "a fin, not a
+            # bag", losing the one feature that most says pelican.
+            w = hw * math.sqrt(max(0.0, 1.0 - (2.0 * t - 1.0) ** 2 * 0.55))
+            iw = max(1, int(round(w)))
             for x in range(-iw, iw + 1):
                 out.add((x, y, z))
     return out
@@ -398,11 +406,21 @@ def build():
             m.voxel((x, y, z), FORENECK)
 
     m.add(tail, TAIL_DARK)
+    # Pale feather tips: the tail's own colour alone left it invisible against
+    # the rump.  Restricted to the distal third and the outer edge so it reads as
+    # an outline rather than a stripe.
+    t_lo = TAIL_Y0 + (TAIL_Y1 - TAIL_Y0) * 2 // 3
+    edge = {(x, y, z) for (x, y, z) in tail
+            if y >= t_lo or abs(x) >= interp(TAIL_HW, y) - 1.0}
+    m.add(edge, TAIL_EDGE)
 
     # ---- wings ---------------------------------------------------------
     for (p, (f, c, above)) in wing.items():
+        # Tilt the arm/hand boundary with chord so the seam runs diagonally
+        # across the feather tracts instead of radially.
+        hand = f >= ARM_F_END - SEAM_TILT * (1.0 - c)
         if above:
-            if f >= ARM_F_END:
+            if hand:
                 col = PRIMARY_COVERT if c <= PCOV_CHORD_END else PRIMARY
             elif f <= TERTIAL_F_END and c > COVERT_CHORD_END:
                 col = TERTIAL
@@ -411,7 +429,7 @@ def build():
             else:
                 col = GREATER if c <= 0.72 else SECONDARY
         else:
-            if f < ARM_F_END and c <= UCOV_CHORD_END:
+            if not hand and c <= UCOV_CHORD_END:
                 col = UNDER_COVERT
             else:
                 col = UNDER_REMIGE
@@ -449,7 +467,7 @@ def build():
 
     # bare facial skin and the eye
     for (x, y, z) in head:
-        if abs(x) >= HEAD_R[0] - 1.6 and -21 <= y <= -17 and 15 <= z <= 18:
+        if abs(x) >= HEAD_R[0] - 1.6 and -21 <= y <= -17 and 16 <= z <= 17:
             m.voxel((x, y, z), FACE_SKIN)
     for side in (-1, 1):
         m.voxel((side * (int(HEAD_R[0]) - 1), -19, 17), EYE)
@@ -525,6 +543,7 @@ def check(m):
         "PRIMARY_COVERT": PRIMARY_COVERT, "UNDER_COVERT": UNDER_COVERT,
         "UNDER_REMIGE": UNDER_REMIGE, "BREAST": BREAST, "BELLY": BELLY,
         "FLANK": FLANK, "UNDERTAIL": UNDERTAIL, "TAIL_DARK": TAIL_DARK,
+        "TAIL_EDGE": TAIL_EDGE,
         "HEAD_WHITE": HEAD_WHITE, "CROWN_YELLOW": CROWN_YELLOW,
         "HINDNECK": HINDNECK, "FORENECK": FORENECK, "FACE_SKIN": FACE_SKIN,
         "EYE": EYE, "BILL_PALE": BILL_PALE, "BILL_RIDGE": BILL_RIDGE,
