@@ -27,6 +27,20 @@ Delegation: render/critique loops read images — run them in a subagent, and
 always give the critic the `.vox` path alongside the PNGs (a critic with only
 renders once reviewed a single bad camera angle as seven viewpoints).
 
+Any delegated stage should **write its output to disk as it goes** — a partial
+build script or a half-filled measurements file is recoverable; work held only
+in a subagent's context is not. Agents killed by transient API errors cannot be
+resumed (`SendMessage` returns "No transcript found"), so relaunching against
+surviving files on disk is the only recovery. One reference pass lost its
+complete vetting decisions this way, twice.
+
+Image budget, everywhere in this document: **nothing you look at should exceed
+a long edge of ~768 px or roughly a megabyte.** A voxel model is 100–250 voxels
+across, so higher resolution carries no information the build can use, and big
+images actively break runs — see Part 2 step 2, where multi-megabyte contact
+sheets killed a reference pass twice. Renders at 512 (Part 1 step 5) are
+already the right size; downscale fetched photos and any crop before viewing.
+
 ---
 
 ## Part 1 — a single object
@@ -122,11 +136,48 @@ Adds two things to Part 1: measured color, and ground truth for the critic.
    (`action=query&generator=search&gsrnamespace=6&prop=imageinfo&iiprop=url&iiurlwidth=1280`).
    Thumb URLs only serve standard bucket widths — 1280 works; odd widths
    return an HTML error body that lands on disk as a fake "JPEG". Check with
-   `file`.
-2. **Vet by looking**: keep only images clearly showing the subject in the
+   `file` on every download and delete the fakes before going further.
+2. **Downscale immediately, before looking at anything.** Fetch at 1280 (the
+   bucket width that works), then resize every keeper to a **long edge of 768
+   px**, JPEG quality 85, and work only from those. Build **contact sheets at
+   400 px tiles, 6 per sheet** for vetting.
+
+   ```python
+   from PIL import Image
+   import glob, os
+   os.makedirs('small', exist_ok=True)
+   for f in sorted(glob.glob('raw/*')):
+       im = Image.open(f).convert('RGB')
+       im.thumbnail((768, 768))                     # long edge, aspect preserved
+       im.save('small/%s.jpg' % os.path.basename(f)[:2], quality=85)
+   ```
+
+   Two reasons, one of which is not obvious:
+
+   - **The model can't use the resolution.** A voxel object is 100–250 voxels
+     across. A 768 px reference is already 3–7× oversampled for every ratio
+     and every color patch you will take off it; 1280 px and up buys nothing.
+   - **Large image reads destabilise the run.** A reference pass on 22 photos
+     died twice to server-side API errors while handling 1.4–1.8 MB contact
+     sheets, losing all its work both times. At 400 px tiles the same sheets
+     are ~70 KB. Keep anything you *view* well under a megabyte: downscale
+     crops below ~700 px before looking at them, and keep swatch montages to
+     a few hundred px.
+
+   Sampling color off the 768 px copy is fine — downscaling averages pixels,
+   so a patch median barely moves. Full-resolution originals are worth opening
+   only for a measurement that genuinely needs the pixels; keep them on disk
+   but out of the loop.
+3. **Checkpoint measurements to a file as you go**, appending after each one
+   rather than reporting at the end. The two crashes above cost a complete set
+   of vetting decisions and ratios that were only ever held in context. Make
+   the notes file the deliverable and the final reply a summary of it.
+4. **Vet by looking**: keep only images clearly showing the subject in the
    pose being built (an in-flight bird is useless for a standing one; discard
-   juveniles/variants). Never use an unvetted image as ground truth.
-3. **Measure colors, don't guess them.** The subject's *name* is a trap — a
+   juveniles/variants). Never use an unvetted image as ground truth. Note the
+   viewing angle — a subject angled away from the camera foreshortens, and
+   averaging a foreshortened length in with a side-on one silently shrinks it.
+5. **Measure colors, don't guess them.** The subject's *name* is a trap — a
    "brown" pelican's body is 1–8% chroma near-neutral grey. Protocol
    (notes.md, "A brown pelican is grey"):
    - Crop small patches of the body parts you need; render a **labelled
@@ -137,7 +188,7 @@ Adds two things to Part 1: measured color, and ground truth for the critic.
      near-blacks lie) and not hue below ~26 chroma (pure noise).
    - A white-balance gain far from 1.0 means the reference patch is wrong,
      not the photo.
-4. Give the vision-loop critic the kept references and have it compare
+6. Give the vision-loop critic the kept references and have it compare
    side-by-side; `devscripts/plumage_match.py` shows the shape of a
    surface-chroma regression check if one is warranted.
 
