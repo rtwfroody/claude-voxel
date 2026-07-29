@@ -1,7 +1,9 @@
 __pycache__/
 *.pyc
 
-# The Seattle Center example is a multi-million-voxel local build (sources plus
-# a 15 MB .vox) and its own devscripts; it is kept out of the repo. Rebuild with
-#   python3 -m examples.seattle_center.build
-examples/seattle_center/
+# playground/ is the scratch space for building new models -- see
+# playground/README.md, which is the one file in there that IS tracked.
+# Everything else is local: sources, multi-million-voxel .vox output, one-off
+# devscripts. Promote something to examples/ when it is worth keeping.
+playground/*
+!playground/README.md

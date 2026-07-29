@@ -8,8 +8,13 @@ description: Step-by-step workflow for creating a voxel object or a multi-object
 This is the procedure distilled from every build logged in `notes.md` (read the
 relevant sections when a step cites them). `CLAUDE.md` has the API table and
 the hard rules (origin-centered builds, seeded randomness, named constants,
-one `examples/<thing>.py` per object); those apply throughout and are not
+one directory or script per object); those apply throughout and are not
 repeated here.
+
+**Build in `playground/<thing>/`**, which is gitignored — a build in progress
+generates one-off diagnostic scripts and large `.vox` files that should not
+land in the repo. `playground/README.md` covers the import patterns and how to
+promote a finished model to `examples/`.
 
 Two facts shape the whole workflow:
 

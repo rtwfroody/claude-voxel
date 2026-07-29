@@ -1,17 +1,32 @@
 # Working in this project
 
 `voxel.py` writes MagicaVoxel `.vox` files. Stdlib only, no dependencies. When
-asked to make a voxel object, write a script under `examples/` that imports it
-and builds the model — don't hand-roll `.vox` bytes, and don't add
-dependencies.
+asked to make a voxel object, write a script that imports it and builds the
+model — don't hand-roll `.vox` bytes, and don't add dependencies.
 
 Read `README.md` for the user-facing tour. This file is the working procedure.
 
+## Where work goes
+
+- **`playground/`** — new models. Gitignored, so scratch files, variants and
+  huge `.vox` output cost nothing. Build here by default. See
+  `playground/README.md` for the two import patterns and how to promote.
+- **`examples/`** — the curated models, tracked. Something moves here only when
+  it is worth reading as a demonstration of the library, with its one-off
+  diagnostic scripts left behind.
+- **`devscripts/`** — tools that exercise `voxel.py` itself. A checker that
+  only ever applied to one model is not library tooling; it stays in that
+  model's playground directory.
+
+Don't add per-model scripts to the repo root or to `devscripts/`. That is how
+the root filled up with a pelican metrics script and four dead bird builds.
+
 ## Building an object
 
-Put each object in its own `examples/<thing>.py` with a `build()` returning a
-`Model` and a `__main__` that saves and optionally previews. Copy the shape of
-`examples/omri_cake.py` — it is the most complete example.
+Put each object in its own `playground/<thing>/` (or `examples/<thing>.py` once
+promoted) with a `build()` returning a `Model` and a `__main__` that saves and
+optionally previews. Copy the shape of `examples/omri_cake.py` — it is the most
+complete example.
 
 Rules that matter:
 

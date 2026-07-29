@@ -18,9 +18,14 @@ m.save("tree.vox")
 | file | what |
 | --- | --- |
 | `voxel.py` | the whole toolkit: model, shapes, palette, reader, writer, preview, CLI |
-| `test_voxel.py` | 66 tests; `python3 test_voxel.py` (also runs under pytest) |
+| `test_voxel.py` | 75 tests; `python3 test_voxel.py` (also runs under pytest) |
 | `examples/demo.py` | three worked builds showing the three authoring idioms |
-| `spaceship/` | a modular-spaceship game asset pack built on this library |
+| `examples/` | the curated models that are worth keeping — read these |
+| `playground/` | scratch space for building new models; gitignored, see its README |
+| `devscripts/` | tools that exercise `voxel.py` itself (scene smoke test, renderer) |
+
+New models start in `playground/`, which is gitignored so nothing there clutters
+the repo. When one turns out to be worth keeping, move it into `examples/`.
 
 ## Coordinates
 
