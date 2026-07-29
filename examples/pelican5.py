@@ -38,40 +38,62 @@ SEED = 20260729
 # ordering of tones are kept; what is stretched is the *spacing*, because
 # photo-accurate medians read as mud at voxel scale.
 #
-# The measurement overturned the received wisdom in notes.md ("a brown pelican
-# is grey", mantle #57575a).  That note is right about HUE -- the pale tracts
-# really are near-neutral, chroma 7-8 -- but wrong about VALUE: they are
-# genuinely LIGHT (foreneck #dcdad5, mantle #c5c1bd), not mid-grey.  The real
-# bird spans luma ~218 to ~16, about 13:1.  Compressing that at the pale end is
-# what made the previous build read as a flat grey blob.
+# notes.md is RIGHT that a brown pelican is near-neutral, and the number holds
+# up under scrutiny: white-balanced whole-bird median chroma across 8 photos is
+# 4, 5, 7, 8, 8, 18, 18, 28 -- median 8.  The three warm outliers are the
+# warm-lit frames (18, 11, 15); five independent photos agree on near-neutral.
+# An intermediate version of this file trusted those three and pushed the
+# plumage to chroma 25-31, which devscripts/plumage_match.py correctly rejected.
+# Per-photo white balance was not enough to save them, probably because the
+# brightest-pixel reference lands partly on the genuinely cream crown and so
+# under-corrects.
 #
-# A second trap found on the way: sampling inside a silhouette mask returns only
-# the DARK parts of a pelican, because a white head is bright and near-neutral
-# and merges with the sky.  Every value here excludes sky by blue-dominance
-# instead, which keeps white plumage.
-CORE            = "#40352c"   # interior, so a cut-away reads as a body
-MANTLE          = "#8e8983"   # measured #c5c1bd chroma 8; darkened so the
-                              # wing covert panel stays the brightest thing
-SCAPULAR        = "#7a756f"
-RUMP            = "#5c5852"
-COVERT          = "#a09b92"   # the pale upperwing panel -- the readable feature
-COVERT_EDGE     = "#b8b3aa"
-GREATER         = "#4a443c"
-TERTIAL         = "#8c877e"
-SECONDARY       = "#2a2621"
-PRIMARY         = "#1b1815"   # measured #1b1815 chroma 6, 98% non-sky
-PRIMARY_COVERT  = "#46403a"
-UNDER_COVERT    = "#b4b0a8"   # pale central underwing band
-UNDER_REMIGE    = "#24211d"
-BREAST          = "#45403a"
-BELLY           = "#1a1815"   # measured #110f0f chroma 2
-FLANK           = "#2a2620"
-UNDERTAIL       = "#221f1b"
-TAIL_DARK       = "#2e2a25"   # measured #181715, lifted: at #22201c it was
+# What notes.md gets WRONG is VALUE, and that is a separate axis from chroma:
+#
+#   white head / foreneck   luma ~210-230, chroma 7    pale and near-neutral
+#   back / upperwing        luma  ~82-141, chroma 10-12  MID, not pale
+#   remiges / belly         luma   ~30-45, chroma 8      dark
+#
+# The earlier note recorded the mantle as #57575a; a still earlier draft of this
+# file had it at #b0aca7, luma 137.  Measured on a frame that actually shows the
+# back it is luma ~92.  Getting value right is what fixes the "flat" complaint;
+# getting chroma right is what keeps it a pelican rather than a khaki bird.
+#
+# Two sampling traps found on the way, both of which biased earlier attempts:
+#
+#  * Sampling inside a silhouette mask returns only the DARK parts of a pelican:
+#    a white head is bright and near-neutral, so it merges with the sky it
+#    touches and is excluded.  These values exclude sky by blue-dominance
+#    instead, which keeps white plumage.
+#  * An earlier "mantle" reading of #c5c1bd (pale silver) came from a BANKING
+#    bird, so the patch was actually its white breast.  The back measures
+#    #68574f -- luma 92, not 193.  Upperparts must be sampled from a frame that
+#    actually shows the back; three blind viewers all reported the pale back as
+#    wrong before the measurement was rechecked.
+CORE            = "#423b36"   # interior, so a cut-away reads as a body
+MANTLE          = "#625b56"   # measured #685143 on a DORSAL frame (photo 18)
+SCAPULAR        = "#57514c"
+RUMP            = "#49433f"
+COVERT          = "#928c86"   # the pale upperwing panel -- the readable feature
+                              # measured #735947 lit / #aa968a pale-edged
+COVERT_EDGE     = "#aba6a0"
+GREATER         = "#45403b"
+TERTIAL         = "#7e7872"
+SECONDARY       = "#312c29"
+PRIMARY         = "#292321"   # measured #1b1815 (below) / #543e33 (lit above)
+PRIMARY_COVERT  = "#403b37"
+UNDER_COVERT    = "#a39f99"   # pale central underwing band
+UNDER_REMIGE    = "#25211d"
+BREAST          = "#342f2b"
+BELLY           = "#211d19"   # measured #110f0f shaded / #4f3b2f lit
+FLANK           = "#2a2622"
+UNDERTAIL       = "#25211d"
+TAIL_DARK       = "#36322d"   # measured #625045 above / #181715 below; at
+                              # #22201c it was
                               # indistinguishable from the rump and read as no tail
-TAIL_EDGE       = "#5a544c"   # pale feather tips, so the tail has an outline
+TAIL_EDGE       = "#635d58"   # pale feather tips, so the tail has an outline
 HEAD_WHITE      = "#e8e6e0"   # measured foreneck #dcdad5 chroma 7
-CROWN_YELLOW    = "#d9c69a"   # measured #d1c2af chroma 34, pushed warmer
+CROWN_YELLOW    = "#e8d0a6"   # measured #ead1a9 chroma 65 on photo 18
 HINDNECK        = "#5e3826"   # narrow nape stripe ONLY -- see NAPE_FLANK
 FORENECK        = "#d3d1cc"   # measured #dcdad5 -- the neck is WHITE in breeding
 FACE_SKIN       = "#2b2a33"   # not measured (too small in frame); knowledge
@@ -93,8 +115,8 @@ L = 116                  # total length, bill tip to tail tip
 HALF_SPAN = 105          # so total width is 211 -- ODD, see the mirror note
 
 # ---------------------------------------------------------------- body
-BILL_TIP_Y = -54
-BILL_BASE_Y = -21        # 33 long = 0.27 L, within the 0.25-0.28 range
+BILL_TIP_Y = -50
+BILL_BASE_Y = -17        # 33 long = 0.28 L, at the top of the 0.25-0.28 range
 TORSO_Y0, TORSO_Y1 = -6, 52
 TAIL_Y0, TAIL_Y1 = 52, 66
 
@@ -117,25 +139,26 @@ BODY = [
 ]
 KEEL = 0.30              # how much the section narrows below its centreline
 
-HEAD_C = (0, -16, 16)    # head sits ON the shoulders, aft of the bill base
+HEAD_C = (0, -12, 16)    # head sits ON the shoulders: its rear edge (-2.8)
+                         # lands on the wing root leading edge (-2)
 HEAD_R = (5.6, 9.2, 5.6)
-NECK = [(2, 8, 6.5), (-4, 11, 6.0), (-9, 13.5, 5.5), (-13, 15, 5.0)]
+NECK = [(4, 8, 6.5), (0, 11, 6.0), (-5, 13.5, 5.5), (-9, 15, 5.0)]
 
 BILL_Z = 12.0
-BILL_HW = [(-54, 1.1), (-46, 1.7), (-38, 2.4), (-29, 3.0), (-21, 3.4)]
-BILL_HH = [(-54, 1.1), (-46, 1.5), (-38, 2.0), (-29, 2.4), (-21, 2.7)]
+BILL_HW = [(-50, 1.1), (-42, 1.7), (-34, 2.4), (-25, 3.0), (-17, 3.4)]
+BILL_HH = [(-50, 1.1), (-42, 1.5), (-34, 2.0), (-25, 2.4), (-17, 2.7)]
 BILL_NAIL_FRAC = 0.10    # last tenth of the bill is the orange nail
 
-POUCH_Y0, POUCH_Y1 = -48, -14
+POUCH_Y0, POUCH_Y1 = -44, -10
 # Depth below the bill, shallow at the distal end and deepest at the throat.
 # Getting this backwards both inverts the anatomy and puts a 9-voxel cliff at
 # the pouch's leading edge.
-POUCH_FLOOR = [(-48, 1.4), (-40, 2.8), (-33, 4.6), (-26, 6.6),
-               (-20, 8.2), (-14, 8.8)]
+POUCH_FLOOR = [(-44, 1.4), (-36, 2.8), (-29, 4.6), (-22, 6.6),
+               (-16, 8.2), (-10, 8.8)]
 # Kept narrower than the head's half-width (5.6) so the pouch reads as slung
 # under the bill rather than as a second head.
-POUCH_HW = [(-48, 1.4), (-40, 2.6), (-33, 3.8), (-26, 4.6),
-            (-20, 4.9), (-14, 4.6)]
+POUCH_HW = [(-44, 1.4), (-36, 2.6), (-29, 3.8), (-22, 4.6),
+            (-16, 4.9), (-10, 4.6)]
 
 # A brown pelican's tail is short but SQUARED -- a stubby fan, not a point.
 # Tapering it to 3.4 made two independent blind viewers report "there is no
@@ -175,8 +198,8 @@ LEAD = [(0.20, -2.0), (0.30, 3.0), (0.40, 6.0), (0.50, 8.5),
         (0.60, 10.0), (0.70, 11.0), (0.85, 10.5), (1.00, 9.0)]
 # a shallow arch: soaring brown pelicans glide on nearly flat wings
 ARCH = [(0.20, 6.0), (0.40, 8.5), (0.60, 10.0), (0.80, 9.5), (1.00, 8.0)]
-THICK = [(0.20, 5.2), (0.30, 3.8), (0.45, 2.6), (0.60, 1.9),
-         (0.80, 1.1), (1.00, 0.5)]
+THICK = [(0.20, 5.8), (0.30, 4.4), (0.45, 3.2), (0.60, 2.4),
+         (0.80, 1.5), (1.00, 0.6)]
 
 FINGER_F = 0.78          # span fraction where the primaries separate
 FINGER_COUNT = 5
@@ -191,7 +214,7 @@ PCOV_CHORD_END = 0.32
 UCOV_CHORD_END = 0.52
 NAPE_HW = 4              # chestnut stripe half-width CAP -- MUST stay narrow
 NAPE_FLANK = 3           # voxels of head colour left outboard on each side
-NAPE_Y0, NAPE_Y1 = -14, -2
+NAPE_Y0, NAPE_Y1 = -10, 2
 MANTLE_Z = 4.0
 
 
@@ -529,10 +552,10 @@ def build():
 
     # bare facial skin and the eye
     for (x, y, z) in head:
-        if abs(x) >= HEAD_R[0] - 1.6 and -21 <= y <= -17 and 16 <= z <= 17:
+        if abs(x) >= HEAD_R[0] - 1.6 and -17 <= y <= -13 and 16 <= z <= 17:
             m.voxel((x, y, z), FACE_SKIN)
     for side in (-1, 1):
-        m.voxel((side * (int(HEAD_R[0]) - 1), -19, 17), EYE)
+        m.voxel((side * (int(HEAD_R[0]) - 1), -15, 17), EYE)
 
     m.add(bill, BILL_PALE)
     for (x, y, z) in bill:
@@ -550,7 +573,7 @@ def build():
     # the throat.  Shading the underside is safe; shading the lateral rim is what
     # notes.md forbids, because the rim is what every side projection shows.
     for (x, y, z) in pouch:
-        m.voxel((x, y, z), POUCH_C if y <= -29 else POUCH_D)
+        m.voxel((x, y, z), POUCH_C if y <= -25 else POUCH_D)
     floor_of = {}
     for (x, y, z) in pouch:
         floor_of[(x, y)] = min(floor_of.get((x, y), 99), z)
@@ -689,18 +712,23 @@ def check(m):
     # ---- ratios, measured off the model itself ------------------------
     span = m.size[0]
     total = m.size[1]
-    print(f"\n{'quantity':<26}{'model':>9}{'target':>9}")
+    # Ranges, not point targets, where the literature gives a range -- a point
+    # target flagged a wingspan/L of 1.80 as drift when 1.7-1.9 is the actual
+    # span of the species.
+    print(f"\n{'quantity':<24}{'model':>8}{'accept':>14}")
     rows = [
-        ("wingspan / L", span / total, 1.75),
-        ("bill / L", (BILL_BASE_Y - BILL_TIP_Y) / total, 0.25),
-        ("head / L", (2 * HEAD_R[1]) / total, 0.15),
-        ("torso / L", (TORSO_Y1 - TORSO_Y0) / total, 0.50),
-        ("tail / L", (TAIL_Y1 - TAIL_Y0) / total, 0.12),
-        ("torso width / L", (2 * torso_hw) / total, 0.19),
+        ("wingspan / L", span / total, 1.70, 1.90),
+        ("bill / L", (BILL_BASE_Y - BILL_TIP_Y) / total, 0.25, 0.30),
+        ("head / L", (2 * HEAD_R[1]) / total, 0.13, 0.18),
+        ("torso / L", (TORSO_Y1 - TORSO_Y0) / total, 0.45, 0.55),
+        ("tail / L", (TAIL_Y1 - TAIL_Y0) / total, 0.10, 0.15),
+        ("torso width / L", (2 * torso_hw) / total, 0.16, 0.22),
     ]
-    for name, got, want in rows:
-        flag = "" if abs(got - want) < 0.04 else "  <-- drift"
-        print(f"{name:<26}{got:>9.3f}{want:>9.3f}{flag}")
+    for name, got, lo_, hi_ in rows:
+        good = lo_ <= got <= hi_
+        ok &= good
+        print(f"{name:<24}{got:>8.3f}{f'{lo_:.2f}-{hi_:.2f}':>14}"
+              f"   {'ok' if good else 'OUT OF RANGE'}")
 
     print(f"\n{'span f':<8}{'chord model':>12}{'chord measured':>16}")
     for f, frac in CHORD:
