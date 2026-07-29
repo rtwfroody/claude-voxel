@@ -112,9 +112,10 @@ seated, `test_voxel.py` if `voxel.py` changed. Plus, from later builds:
 In a subagent, up to ~3 rounds:
 
 1. Render: `devscripts/render_vox.sh <vox> <outdir> 512` — 16-frame turntable
-   + isometric. The thumbnailer's `-a/-d/--sunelevation` flags are silently
-   ignored; the script md5-checks that frames differ — heed its warning. ASan
-   stderr noise is not failure.
+   + isometric. Needs `vengi-thumbnailer` on PATH (or `THUMB=/path/to/it`);
+   the script says so and exits 1 if it is missing. The thumbnailer's
+   `-a/-d/--sunelevation` flags are silently ignored; the script md5-checks
+   that frames differ — heed its warning. ASan stderr noise is not failure.
 2. **Blind identification first**: before comparing against anything, ask
    "what is this?" of the renders (a fresh subagent is ideal). If the answer
    isn't the subject, that gap is the round's priority.
@@ -189,8 +190,10 @@ Adds two things to Part 1: measured color, and ground truth for the critic.
    - A white-balance gain far from 1.0 means the reference patch is wrong,
      not the photo.
 6. Give the vision-loop critic the kept references and have it compare
-   side-by-side; `devscripts/plumage_match.py` shows the shape of a
-   surface-chroma regression check if one is warranted.
+   side-by-side. If a surface-chroma regression check is warranted, key it on
+   the **area-weighted median chroma of the visible surface** (depth-tested
+   from three views) rather than a raw voxel count — see notes.md, "A brown
+   pelican is grey".
 
 ## Part 3 — without photo references
 
