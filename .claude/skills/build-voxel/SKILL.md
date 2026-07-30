@@ -5,11 +5,10 @@ description: Step-by-step workflow for creating a voxel object or a multi-object
 
 # Building voxel objects and scenes
 
-This is the procedure distilled from every build logged in `notes.md` (read the
-relevant sections when a step cites them). `CLAUDE.md` has the API table and
-the hard rules (origin-centered builds, seeded randomness, named constants,
-one directory or script per object); those apply throughout and are not
-repeated here.
+This is the procedure distilled from the builds that came before. `CLAUDE.md`
+has the API table and the hard rules (origin-centered builds, seeded
+randomness, named constants, one directory or script per object); those apply
+throughout and are not repeated here.
 
 **Build in `playground/<thing>/`**, which is gitignored — a build in progress
 generates one-off diagnostic scripts and large `.vox` files that should not
@@ -41,7 +40,7 @@ say what they contain.
 ## Step 0 — agree the visual style before building anything
 
 **There is no house style.** The models in this repo do not share one, and
-nothing in `CLAUDE.md` or `notes.md` implies a default. Do not infer one from
+nothing in `CLAUDE.md` implies a default. Do not infer one from
 `examples/` — `omri_cake.py` is a reference for *code* structure (build(),
 named constants, seeded randomness), not for how a model should look.
 
@@ -99,9 +98,9 @@ Two facts shape the whole workflow:
 
 1. **Geometric checks and visual critique catch disjoint bug classes.** A
    model can pass connectivity, symmetry, palette, and profile checks while
-   reading as the wrong animal (pelican4 round 0 passed everything and looked
-   like a dodo). Conversely, a critic looking at renders will never notice a
-   1-voxel mirror seam or an unsupported footprint. Always run both.
+   reading as the wrong animal — one bird draft passed every geometric check
+   and read as a dodo. Conversely, a critic looking at renders will never
+   notice a 1-voxel mirror seam or an unsupported footprint. Always run both.
 2. **Author in the representation you can proofread.** ASCII silhouettes and
    2D profiles expose topology and profile errors before any 3D exists — but
    they hide proportion errors, which only renders expose. Plan for both
@@ -137,7 +136,7 @@ already the right size; downscale fetched photos and any crop before viewing.
   conventions (front: x right / z up; side: y right / z up; top: x right /
   y up), so a drawn mask is directly comparable to a preview later.
 - **Mechanical / architectural** → primitives + set algebra
-  (`shapes.* | - &`), the `omri_cake.py` / `spaceship/` style.
+  (`shapes.* | - &`), the `examples/omri_cake.py` style.
 - **Flat or strongly layered things** → `Model.from_layers`.
 
 These compose: hull for the body mass, primitives for parts that protrude,
@@ -151,14 +150,14 @@ builds):
 - Print the masks with a column/row ruler and look at them.
 - Walk the **underside profile** (min z per column of the side mask): any step
   ≥ 4 outside a legitimate discontinuity (legs, wheels) is the "cliff" bug
-  class — a sheer wall no 3D check will ever flag (notes.md, pelican2).
+  class — a sheer wall no 3D check will ever flag.
 - Name the dorsal features you expect (e.g. crown → nape hollow → shoulder
   hump) and confirm the mask's top edge actually has them. A curve in your
   intent is not a curve in the model.
 - **Proportion does not survive ASCII proofreading.** Measure the ratios that
   define the subject (bill:body length, head:body, wheel:cabin) numerically
-  against the reference or known anatomy. Pelican4's bill was drawn mostly
-  *under* the head; the mask "looked right" and rendered as a dodo.
+  against the reference or known anatomy. One bird draft had its bill drawn
+  mostly *under* the head; the mask "looked right" and rendered as a dodo.
 
 Known hull limits — plan post-passes for them rather than fighting the masks:
 a cross-section rectangular in two views comes out boxy (chamfer it after);
@@ -169,12 +168,12 @@ union (check that region in renders first).
 ### 3. Build and paint
 
 - Geometry first, then paint by region over the built coords (later `add`
-  wins — order base coats before details; `notes.md` "swallowed detail").
+  wins — order base coats before details, or a later pass swallows them).
 - Clamp every painted region on **all** axes it doesn't span. An unclamped
   x-range turned a neck stripe into a saddle across the whole back.
 - Shade undersides and creases, never the lateral silhouette rim — the rim is
   exactly what every side projection shows, and rim-shading hides the main
-  color from all views (notes.md, pouch).
+  color from all views.
 - Keep contrast *between* feature regions, cut it *within* them; per-voxel
   banding at voxel scale reads as noise, not texture.
 
@@ -186,8 +185,8 @@ seated, `test_voxel.py` if `voxel.py` changed. Plus, from later builds:
 
 - Project single colors instead of trusting the legend past 14 colors.
 - For a metric you write yourself, run it against a deliberately broken build
-  once — a check that can't fail is worse than no check (notes.md has four
-  separate instances).
+  once — a check that can't fail is worse than no check. This has gone wrong
+  more often than any other verification mistake.
 - Mirror caveat for even widths: the true plane is a half-integer;
   integer-center mirror checks false-positive.
 
@@ -263,8 +262,7 @@ Adds two things to Part 1: measured color, and ground truth for the critic.
    viewing angle — a subject angled away from the camera foreshortens, and
    averaging a foreshortened length in with a side-on one silently shrinks it.
 5. **Measure colors, don't guess them.** The subject's *name* is a trap — a
-   "brown" pelican's body is 1–8% chroma near-neutral grey. Protocol
-   (notes.md, "A brown pelican is grey"):
+   "brown" pelican's body is 1–8% chroma near-neutral grey. Protocol:
    - Crop small patches of the body parts you need; render a **labelled
      swatch montage** (crop image + its median hex) and *look at it* — this
      confirms position and color in one step. Identical medians from
@@ -276,8 +274,8 @@ Adds two things to Part 1: measured color, and ground truth for the critic.
 6. Give the vision-loop critic the kept references and have it compare
    side-by-side. If a surface-chroma regression check is warranted, key it on
    the **area-weighted median chroma of the visible surface** (depth-tested
-   from three views) rather than a raw voxel count — see notes.md, "A brown
-   pelican is grey".
+   from three views) rather than a raw voxel count — a count says nothing
+   about what the eye actually sees.
 
 ## Part 3 — without photo references
 
@@ -304,9 +302,9 @@ unreferenced builds go wrong:
    then use `Scene` (255-color limit is global either way). Budget the
    palette across objects *before* building.
 2. **Terrain/ground first.** Skin height fields by filling each column down
-   to its lowest 4-neighbour — a 1-voxel skin is a sieve and detaches
-   (notes.md, fountain). Restrict slope-shading to real steps (drop ≥ 2) or
-   the whole surface flattens.
+   to its lowest 4-neighbour — a 1-voxel skin is a sieve and detaches.
+   Restrict slope-shading to real steps (drop ≥ 2) or the whole surface
+   flattens.
 3. **Build each object as its own module** with `build()` returning a
    `Model`, verified per Part 1, then `merge`/`place` with offsets. Keep a
    layout table (name → offset → footprint) in one place.
@@ -317,7 +315,7 @@ unreferenced builds go wrong:
 5. **If objects must connect** (modular kits): fix the attachment convention
    first and smoke-test it — orient one test box onto every socket/facing
    and check bounds — before authoring any real asset. Score the *contract*
-   region (the mount plate), not the whole face. (notes.md, spaceship.)
+   region (the mount plate), not the whole face.
 6. **Weathering/greebling passes are destructive**: restrict them to masked
    regions, run them before emissive/legible detail, and re-paint the one
    feature that makes each shape readable afterwards. The unused-palette
@@ -371,7 +369,7 @@ Promoting means the full job, not a paste:
    `.vox` is unchanged — that is what proves the generalization was faithful.
 
 If nothing qualifies, say so and move on; a forced promotion costs more than it
-saves. Either way, note in `notes.md` what you promoted or why you didn't.
+saves. Either way, say in the final report what you promoted or why you didn't.
 
 ## Done means
 
@@ -381,5 +379,4 @@ the style table from step 0 checked off against the finished model — a build
 that drifted off its agreed palette ceiling or detail density is not done, and
 the drift is only visible if the numbers were written down first. Plus the
 build script's docstring carrying the prompt and every follow-up, and the
-reusable-helper pass above run to a decision. Then log anything newly learned
-in `notes.md` — including checks that didn't work and why.
+reusable-helper pass above run to a decision.
