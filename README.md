@@ -18,7 +18,7 @@ m.save("tree.vox")
 | file | what |
 | --- | --- |
 | `voxel.py` | the whole toolkit: model, shapes, palette, reader, writer, preview, CLI |
-| `test_voxel.py` | 109 tests; `python3 test_voxel.py` (also runs under pytest) |
+| `test_voxel.py` | 111 tests; `python3 test_voxel.py` (also runs under pytest) |
 | `examples/demo.py` | three worked builds showing the three authoring idioms |
 | `examples/` | the curated models that are worth keeping — read these |
 | `playground/` | scratch space for building new models; gitignored, see its README |
@@ -141,10 +141,21 @@ being silently skipped.
 
 ## Color, and working from a reference
 
-Colors are names from `NAMED_COLORS`, `"#rrggbb"` or `(r, g, b[, a])`.
-`parse_color` is the canonical form every function here returns, and `to_hex`
-is the printable one. `luma` is perceived brightness, `chroma` is
-colorfulness.
+Colors are names from `NAMED_COLORS`, `"#rrggbb"` or `(r, g, b[, a])`. `luma`
+is perceived brightness, `chroma` is colorfulness.
+
+Every color operation returns **floats**, clamped to 0-255 but not rounded,
+and composes with the others losslessly. A color rounds in exactly two places:
+`parse_color`, when it is painted, and `to_hex`, when it is printed. That
+matters because these functions are usually the *first step of a chain* —
+integrate a measured ramp, then tint the result into a family of ten colors —
+and rounding each step propagates. A mean channel landing on 182.5 becomes 182
+before anything downstream sees it, and every tint derived from it comes out a
+unit low: far too small to see, far too small for any check to flag, and not
+what the measurement said.
+
+The corollary is about testing. A helper at the head of a chain cannot be
+validated by comparing its own return value — compare the end of the chain.
 
 Two ways to change a color's brightness, which look interchangeable and are
 not. Both scale `luma` by `k`; only `chroma` tells them apart afterwards:

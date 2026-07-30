@@ -101,6 +101,15 @@ matches the physics, because the two look interchangeable and are not:
 Both scale `luma` by `k`, so only `chroma` tells them apart afterwards. Getting
 this backwards turned a 1.6x brightness fix into a 1.6x saturation increase.
 
+**Colour ops return floats and never round.** Rounding happens in exactly two
+places: `parse_color` when a colour is painted, `to_hex` when it is printed.
+Keep derived colours unrounded — these functions are usually the head of a
+chain (integrate a ramp, then tint it into a family), and a mean channel
+landing on 182.5 rounds to 182 before anything downstream sees it, dragging
+every derived tint a unit low. It is invisible and no check catches it. The
+testing corollary: **a helper at the head of a chain cannot be validated by
+comparing its own return value — compare the end of the chain.**
+
 `disc_average(ramp)` reduces a measured centre-to-rim ramp to the one color a
 flat disc should be. Area goes as the radius, so 75% of a disc lies outside
 half-radius and reading the middle of the table lands far too bright.
@@ -160,7 +169,7 @@ object is right. Every bug so far was invisible in it. Run these:
    ```python
    n = sum(1 for p in footprint if (p[0], p[1], surface_z) in m)
    ```
-5. **`python3 test_voxel.py`** after touching `voxel.py` (109 tests).
+5. **`python3 test_voxel.py`** after touching `voxel.py` (111 tests).
 
 For legibility of text or fine detail, project just those voxels rather than
 previewing the whole model:
