@@ -16,6 +16,28 @@ generates one-off diagnostic scripts and large `.vox` files that should not
 land in the repo. `playground/README.md` covers the import patterns and how to
 promote a finished model to `examples/`.
 
+**Record the prompt in the build script.** The main Python file — the one with
+`build()` in it — opens with a module docstring quoting the user's request
+verbatim, before any import:
+
+```python
+"""Chess knight, voxel model.
+
+Prompt:
+    "make me a chess knight, stylized game asset, about 40 voxels tall"
+
+Follow-ups:
+    "the mane reads as a fin -- break it into locks"
+"""
+```
+
+Quote it, don't paraphrase: the wording is the specification, and a summary
+loses exactly the constraint that gets argued about later. Append each
+follow-up that changed the model as its own line, so the docstring stays the
+record of what was actually asked for across the whole build. A multi-module
+build puts this in the entry point (`build.py`) only; the other modules just
+say what they contain.
+
 ## Step 0 — agree the visual style before building anything
 
 **There is no house style.** The models in this repo do not share one, and
@@ -315,12 +337,49 @@ unreferenced builds go wrong:
 
 ---
 
+## Last step — harvest anything reusable into `voxel.py`
+
+Once the model is finished, read back through the Python you wrote for it and
+ask of each helper: **would this be useful on a model of a different subject in
+a different style?** A build that needed a helper usually needed it because the
+library was missing something, and leaving it in `playground/` means the next
+build writes it again, slightly differently.
+
+Promote what passes. Typical of what does:
+
+- a shape or set operation the `shapes.*` family doesn't cover (a wedge, a
+  helix, a bevel/chamfer pass over an existing coord set)
+- a query or check that is about *voxel models in general* rather than this
+  model — support counting under a footprint, surface extraction, a projection
+  helper the verification steps kept reimplementing
+- a transform, or a palette/color utility with no subject knowledge in it
+
+What stays behind: anything that names this model's parts, encodes its
+proportions, or only makes sense for its style. A checker that only ever
+applied to one asset is not library tooling (`CLAUDE.md` says this about
+`devscripts/` too).
+
+Promoting means the full job, not a paste:
+
+1. Generalize it — drop the caller's assumptions, take a coord set or an axis
+   argument where the local version hard-coded one.
+2. Match the surrounding API: shape functions return `set[(x,y,z)]`, `Model`
+   methods mutate and return `self`, `axis="x"|"y"|"z"` where it applies.
+3. Add tests to `test_voxel.py` and run the whole file.
+4. Update the API table in `CLAUDE.md` and the tour in `README.md`.
+5. Rewrite the build to call the library version, rebuild, and confirm the
+   `.vox` is unchanged — that is what proves the generalization was faithful.
+
+If nothing qualifies, say so and move on; a forced promotion costs more than it
+saves. Either way, note in `notes.md` what you promoted or why you didn't.
+
 ## Done means
 
 Geometric suite green **and** a final-round render critique with nothing but
 nitpicks **and** (if references exist) colors within measured tolerance **and**
 the style table from step 0 checked off against the finished model — a build
 that drifted off its agreed palette ceiling or detail density is not done, and
-the drift is only visible if the numbers were written down first. Then
-log anything newly learned in `notes.md` — including checks that didn't work
-and why.
+the drift is only visible if the numbers were written down first. Plus the
+build script's docstring carrying the prompt and every follow-up, and the
+reusable-helper pass above run to a decision. Then log anything newly learned
+in `notes.md` — including checks that didn't work and why.
