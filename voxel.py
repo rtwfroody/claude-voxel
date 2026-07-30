@@ -67,7 +67,12 @@ def parse_color(c):
     """Coerce a color spec to an (r, g, b, a) tuple of ints 0-255.
 
     Accepts a name from NAMED_COLORS, "#rgb"/"#rrggbb"/"#rrggbbaa", or an
-    (r, g, b) / (r, g, b, a) sequence.
+    (r, g, b) / (r, g, b, a) sequence, whose members may be floats.
+
+    This is the one place a color becomes integral, and it is deliberately the
+    *last* place: the color operations below return floats so that a derived
+    color keeps full precision until it is painted or printed. See the note
+    above `scale_color`.
     """
     if isinstance(c, str):
         s = NAMED_COLORS.get(c.lower().replace(" ", "_"), c).lstrip("#")
@@ -81,12 +86,286 @@ def parse_color(c):
             return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4, 6))
         except ValueError:
             raise ValueError(f"unrecognized color {c!r}") from None
-    vals = tuple(int(v) for v in c)
+    vals = tuple(int(round(v)) for v in c)
     if len(vals) == 3:
         vals += (255,)
     if len(vals) != 4 or not all(0 <= v <= 255 for v in vals):
         raise ValueError(f"unrecognized color {c!r}")
     return vals
+
+
+def _channels(color):
+    """A color spec as four float channels, keeping a numeric input's precision.
+
+    The read side of the precision contract: `parse_color` would round a
+    computed color on the way *in*, which loses just as much as rounding on
+    the way out. Names and hex strings are integral anyway.
+    """
+    if isinstance(color, str):
+        return tuple(float(v) for v in parse_color(color))
+    vals = tuple(float(v) for v in color)
+    if len(vals) == 3:
+        vals += (255.0,)
+    if len(vals) != 4 or not all(0.0 <= v <= 255.0 for v in vals):
+        raise ValueError(f"unrecognized color {color!r}")
+    return vals
+
+
+def _clamp_rgba(vals):
+    """Clamp four channel values into range, *without* rounding them.
+
+    Rounding here is what a color operation must not do -- see the note above
+    `scale_color`.
+    """
+    return tuple(max(0.0, min(255.0, float(v))) for v in vals)
+
+
+def to_hex(color):
+    """Any color spec as "#rrggbb", or "#rrggbbaa" when it is translucent.
+
+    The printable form, and one of the two places a color rounds. Use it for
+    logs, dict keys and eyeballing a computed color against a measured one.
+    """
+    rgba = parse_color(color)
+    if rgba[3] == 255:
+        return "#%02x%02x%02x" % rgba[:3]
+    return "#%02x%02x%02x%02x" % rgba
+
+
+def luma(color):
+    """Rec.601 perceived brightness, 0-255.
+
+    The one number to compare two colors by when you care how light they look
+    rather than what hue they are.
+    """
+    r, g, b, _ = _channels(color)
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def chroma(color):
+    """Colorfulness as max channel minus min, 0-255; 0 is a pure grey.
+
+    Mostly useful as a *check*: it is the quantity `relight` holds fixed and
+    `scale_color` moves, so measuring it before and after tells you which of
+    the two you actually applied.
+    """
+    r, g, b, _ = _channels(color)
+    return float(max(r, g, b) - min(r, g, b))
+
+
+# Every operation from here down returns **floats**, clamped to 0-255 but not
+# rounded, and composes with the others without losing precision. A color
+# rounds in exactly two places: `parse_color`, when it is painted, and
+# `to_hex`, when it is printed.
+#
+# That is not fussiness. These functions are usually the *first step of a
+# chain* -- integrate a measured ramp, then tint the result into a family of
+# ten colors -- and rounding each step propagates. A mean channel that lands
+# on 182.5 becomes 182 before anything downstream sees it, and every tint
+# derived from it is then a unit low. The error is a single count in one
+# channel, far too small to see and far too small for any check to flag, but
+# it moves every color in the family and it is not what the measurement said.
+#
+# The corollary is about testing, and it cost a wrong "exact" claim here: a
+# helper at the head of a chain cannot be validated by comparing its own
+# return value. Compare the end of the chain.
+
+# The two brightness operations below both multiply `luma` by `k`, and differ
+# in everything else. Picking the wrong one is silent -- the result is a
+# plausible color of the right brightness -- so choose by what you are
+# modelling, not by which reads better:
+#
+#   scale_color   multiplies every channel.  Chroma scales with brightness.
+#                 This is what light physically does: a darker surface of the
+#                 same material reflects less of every wavelength. Use it for
+#                 albedo, shading, tinting a base color into a family.
+#
+#   relight       adds one offset to every channel.  Chroma is unchanged.
+#                 This is an exposure correction: it says "the reference photo
+#                 was shot too dark, but I believe its colorfulness". Use it
+#                 when the brightness is known wrong and the color is not.
+
+def scale_color(color, k):
+    """Multiply every channel by `k`. Luma scales by `k`; so does chroma.
+
+    The physical operation -- halving a surface's albedo halves what it
+    reflects at every wavelength -- so this is the honest way to darken or
+    lighten a *material*. Hue is preserved exactly, and so is every ratio
+    inside the color, which is why a family of tints of one base still reads
+    as one substance.
+
+    See `relight` for the version that leaves chroma alone, and note that
+    channels clamp at 255: scaling an already-bright color up will desaturate
+    it as channels pile into the ceiling.
+    """
+    r, g, b, a = _channels(color)
+    return _clamp_rgba((r * k, g * k, b * k, a))
+
+
+def relight(color, k):
+    """Shift every channel so luma scales by `k`. Chroma is unchanged.
+
+    Adding one offset to all three channels moves luma by that offset and
+    leaves every channel *difference* -- which is what chroma is -- untouched.
+    That is the operation wanted when a reference's brightness is known to be
+    wrong (it was shot underexposed) but its colorfulness is believed.
+
+    `scale_color` would drag chroma along with luma, so a 1.6x brightness fix
+    would silently become a 1.6x saturation increase. That mistake is the
+    reason these are two functions instead of one.
+    """
+    r, g, b, a = _channels(color)
+    d = luma(color) * (k - 1.0)
+    return _clamp_rgba((r + d, g + d, b + d, a))
+
+
+# -- color ramps ------------------------------------------------------------
+# A ramp is [(position, color), ...] with strictly ascending positions: a
+# measured gradient, sampled wherever you could read a value off the
+# reference. What you do with one is read a color out of it (`ramp_at`) or
+# reduce it to a single color (`disc_average`).
+
+def ramp_at(ramp, t):
+    """Color at position `t` along a ramp, interpolated and clamped at the ends."""
+    if not ramp:
+        raise ValueError("ramp is empty")
+    ts = [k[0] for k in ramp]
+    if any(b <= a for a, b in zip(ts, ts[1:])):
+        raise ValueError("ramp positions must be strictly ascending")
+    if t <= ts[0]:
+        return _channels(ramp[0][1])
+    for (t0, c0), (t1, c1) in zip(ramp, ramp[1:]):
+        if t <= t1:
+            f = (t - t0) / (t1 - t0)
+            a, b = _channels(c0), _channels(c1)
+            return _clamp_rgba(tuple(a[i] + (b[i] - a[i]) * f for i in range(4)))
+    return _channels(ramp[-1][1])
+
+
+def disc_average(ramp, steps=2000):
+    """The one color a flat disc should be, given its center-to-rim ramp.
+
+        integral(0..1) c(u) * 2u du  /  integral(0..1) 2u du
+
+    `ramp` is positioned in *radius fraction*, 0 at the center and 1 at the
+    rim. The area of the annulus at `u` goes as `u`, so the outside of a disc
+    carries far more of it than the middle does -- 75% of a disc's area lies
+    outside u = 0.5. Averaging the ramp's entries, or reading the middle of
+    the table, therefore lands much too close to the center color.
+
+    Photographs of round things are the usual source of a ramp like this, and
+    the usual mistake is to paint the object the color the middle of the photo
+    shows. Integrate instead.
+    """
+    num = [0.0, 0.0, 0.0, 0.0]
+    den = 0.0
+    for i in range(steps):
+        u = (i + 0.5) / steps
+        w = 2.0 * u
+        c = ramp_at(ramp, u)
+        for k in range(4):
+            num[k] += w * c[k]
+        den += w
+    return _clamp_rgba(tuple(n / den for n in num))
+
+
+def _interp(knots, x):
+    """Linear interpolation over [(x, y), ...] ascending, clamped at both ends."""
+    if x <= knots[0][0]:
+        return knots[0][1]
+    for (x0, y0), (x1, y1) in zip(knots, knots[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return knots[-1][1]
+
+
+# -- matching a source's values onto measured colors -------------------------
+# Reusing someone else's map, image or heightfield for its *structure* while
+# taking every color from your own measurements. Both functions take
+# `weights`: {source value: how much of the picture it covers}. What "covers"
+# means is yours to decide -- a plain cell count, or an area weight when the
+# cells are not equal-area (see `equirect_shares` in the solar-system build
+# for the spherical case, where raw counts give the poles five times their
+# share).
+
+def weighted_quantiles(weights, fractions):
+    """Cut values splitting a weighted distribution at cumulative `fractions`.
+
+    Returns one value per fraction; bucket `k` is everything with
+    `cuts[k-1] < v <= cuts[k]`, so the cuts are inclusive upper bounds and
+    there is one more bucket than there are cuts.
+
+    Every cut lands on a **whole value boundary**, which is the point of this
+    over a plain interpolated quantile. A quantised source holds only a
+    handful of distinct values, so a cut placed at the exact requested
+    fraction almost always falls *inside* a tied group of them. Splitting
+    there either dithers identical cells between two buckets or, if the
+    comparison is inclusive, empties the bucket above it entirely and loses a
+    color with no other symptom. Each cut is instead the value boundary
+    nearest its requested fraction, and the cuts are forced strictly
+    increasing so every bucket keeps at least one value.
+
+    Achieved coverage therefore differs from what was asked for, by however
+    much the snapping moved each cut. If something downstream depends on the
+    split -- a mean brightness, say -- measure it from the result rather than
+    computing it from `fractions`.
+    """
+    vals = sorted(weights)
+    total = float(sum(weights.values()))
+    if not vals or total <= 0:
+        raise ValueError("weights are empty or sum to zero")
+    cum, acc = [], 0.0
+    for v in vals:
+        acc += weights[v]
+        cum.append(acc / total)
+
+    cuts, lo = [], 0
+    for k, f in enumerate(fractions):
+        hi = len(vals) - 1 - (len(fractions) - k)      # leave room above
+        if lo > hi:
+            raise ValueError(
+                f"{len(vals)} distinct values cannot be cut into "
+                f"{len(fractions) + 1} non-empty buckets"
+            )
+        j = min(range(lo, hi + 1), key=lambda t: abs(cum[t] - f))
+        cuts.append(vals[j])
+        lo = j + 1
+    return cuts
+
+
+def match_histogram(weights, ramp, distribution=None, key=None):
+    """Give every source value the ramp color at its own cumulative rank.
+
+    Returns {source value: color}. Values are ranked in sorted order (pass
+    `key` if the natural order is not dark-to-light), and each one is placed
+    at the midpoint of the span it covers -- so a value covering half the
+    picture lands at rank 0.25 if it is the darkest, not at 0.5.
+
+    This is a **histogram match**, and the alternative that looks equivalent
+    is not. Rescaling the source's range linearly onto the measured range
+    assumes the two distributions have the same *shape*; when they do not, the
+    result is wrong in a way that passes every check, because it has the right
+    extremes, the right structure and a plausible spread. Matching by rank
+    fixes it by construction: every source value is placed at the measured
+    brightness that has the same fraction of the picture below it.
+
+    `ramp` is the measured colors at their own measured positions.
+    `distribution` is the measured spread as [(cumulative fraction, ramp
+    position), ...] -- how the target's own brightness is distributed -- and
+    defaults to the identity, i.e. rank maps straight onto ramp position.
+    """
+    order = sorted(weights, key=key) if key is not None else sorted(weights)
+    total = float(sum(weights.values()))
+    if not order or total <= 0:
+        raise ValueError("weights are empty or sum to zero")
+    out, cum = {}, 0.0
+    for v in order:
+        share = weights[v] / total
+        t = cum + share / 2.0
+        out[v] = ramp_at(ramp, _interp(distribution, t)
+                         if distribution is not None else t)
+        cum += share
+    return out
 
 
 class Palette:
@@ -147,6 +426,67 @@ class Palette:
 
     def __len__(self):
         return len(self._colors)
+
+
+# --------------------------------------------------------------------------
+# value noise -- seeded, reproducible, and the same on every machine
+# --------------------------------------------------------------------------
+
+def _hash01(ix, iy, iz, seed):
+    h = (ix * 374761393 + iy * 668265263 + iz * 2147483647 + seed * 1274126177)
+    h &= 0xFFFFFFFF
+    h = (h ^ (h >> 13)) * 1274126177
+    h &= 0xFFFFFFFF
+    h ^= h >> 16
+    return (h & 0xFFFFFF) / float(0xFFFFFF)
+
+
+def _smooth(t):
+    return t * t * (3.0 - 2.0 * t)
+
+
+def noise3(x, y, z, seed=0):
+    """Seeded value noise in [0, 1], trilinear with a smoothstep fade.
+
+    A pure function of its arguments -- no global state, no `random` -- so a
+    rebuild is identical without anyone having to remember to reseed.
+    """
+    ix, iy, iz = math.floor(x), math.floor(y), math.floor(z)
+    fx, fy, fz = _smooth(x - ix), _smooth(y - iy), _smooth(z - iz)
+    c = [[[_hash01(ix + i, iy + j, iz + k, seed) for k in (0, 1)]
+          for j in (0, 1)] for i in (0, 1)]
+    lerp = lambda a, b, t: a + (b - a) * t
+    x00 = lerp(c[0][0][0], c[1][0][0], fx)
+    x10 = lerp(c[0][1][0], c[1][1][0], fx)
+    x01 = lerp(c[0][0][1], c[1][0][1], fx)
+    x11 = lerp(c[0][1][1], c[1][1][1], fx)
+    return lerp(lerp(x00, x10, fy), lerp(x01, x11, fy), fz)
+
+
+def fbm3(x, y, z, seed=0, octaves=4, lacunarity=2.0, gain=0.5):
+    """Fractal sum of `noise3`, normalized back into [0, 1].
+
+    **The output is nowhere near uniform on [0, 1].** It is a sum of smoothed
+    noise, so it piles up in the middle: measured over a surface it runs about
+    p20 = 0.40, p50 = 0.52, p80 = 0.62. Thresholds picked as if it were
+    uniform therefore do not give the coverage they look like -- cuts at
+    0.2/0.8 select far less than 20% each, and cuts chosen to *look* like a
+    60/40 split hand most of the surface to one side. Two separate builds have
+    been bitten by this.
+
+    If the coverage matters, sample the field over the coordinates you are
+    actually going to paint and take its quantiles:
+
+        vals = [fbm3(x * s, y * s, z * s, seed) for x, y, z in coords]
+        cuts = weighted_quantiles({v: 1 for v in vals}, [0.25, 0.75])
+    """
+    total, amp, norm, f = 0.0, 1.0, 0.0, 1.0
+    for o in range(octaves):
+        total += amp * noise3(x * f, y * f, z * f, seed + o * 101)
+        norm += amp
+        amp *= gain
+        f *= lacunarity
+    return total / norm
 
 
 # --------------------------------------------------------------------------
@@ -504,6 +844,123 @@ class shapes:
         return out
 
     @staticmethod
+    def rock(center, radii, seed=0, roughness=0.30, freq=1.7, floor=0.60):
+        """A lumpy triaxial solid: an ellipsoid chewed up by 3-D value noise.
+
+        The primitive for anything that is not supposed to look manufactured
+        -- boulders, rubble, asteroids, a potato, a lump of ore. Every other
+        shape here is smooth, and a scatter of small spheres standing in for
+        rough reads as bad anti-aliasing rather than as a rough thing.
+
+        `radii` is (rx, ry, rz) of the underlying ellipsoid, so shape is
+        available as an input rather than just size -- most real irregular
+        objects are markedly non-round, and a 3:1 lump and a 1:1 lump read as
+        different objects, not as the same object at two sizes. The noise is
+        sampled on the ellipsoid's *own* unit sphere, so the lumps stay smooth
+        and evenly sized however squashed it is.
+
+        `roughness` is the fraction of the radius the surface may wander by,
+        `floor` the smallest fraction it may shrink to, and `freq` how many
+        lumps go round it. The result is filtered to its largest connected
+        component: at radii near a single voxel the noise can otherwise shear
+        a corner clean off, which then shows up as a phantom extra object in
+        any component count.
+        """
+        cx, cy, cz = center
+        rx, ry, rz = (max(0.6, float(v)) for v in radii)
+        lim = [int(math.ceil(v * (1.0 + 2.0 * roughness))) + 1
+               for v in (rx, ry, rz)]
+        out = set()
+        for dz in range(-lim[2], lim[2] + 1):
+            for dy in range(-lim[1], lim[1] + 1):
+                for dx in range(-lim[0], lim[0] + 1):
+                    q = math.sqrt((dx / rx) ** 2 + (dy / ry) ** 2
+                                  + (dz / rz) ** 2)
+                    if q == 0.0:
+                        out.add((cx, cy, cz))
+                        continue
+                    if q > 1.0 + 2.0 * roughness:
+                        continue
+                    ux, uy, uz = dx / (rx * q), dy / (ry * q), dz / (rz * q)
+                    k = fbm3(ux * freq, uy * freq, uz * freq, seed, octaves=3)
+                    if q <= max(floor, 1.0 + roughness * (2.0 * k - 1.0) * 2.0):
+                        out.add((cx + dx, cy + dy, cz + dz))
+        parts = components(out)
+        return parts[0] if parts else {(cx, cy, cz)}
+
+    @staticmethod
+    def _walk6(a, b):
+        """Integer path from `a` to `b` inclusive, stepping one axis at a time.
+
+        Face-connected by construction, which `line` is not: `line` rounds a
+        parametric sample per step and so happily produces two voxels that
+        meet only at a corner.
+        """
+        cur = list(a)
+        d = [b[i] - a[i] for i in range(3)]
+        n = sum(abs(v) for v in d)
+        out = [tuple(cur)]
+        if n == 0:
+            return out
+        step = [1 if v > 0 else -1 for v in d]
+        done = [0, 0, 0]
+        for k in range(1, n + 1):
+            t = k / n
+            pick, worst = -1, -1.0
+            for i in range(3):
+                if done[i] >= abs(d[i]):
+                    continue
+                short = abs(a[i] + d[i] * t - cur[i])
+                if short > worst:
+                    worst, pick = short, i
+            cur[pick] += step[pick]
+            done[pick] += 1
+            out.append(tuple(cur))
+        return out
+
+    @staticmethod
+    def tube(points, radius, end_radius=None, taper=1.0):
+        """A ball swept along the polyline `points`, optionally tapering.
+
+        One connected piece for any radius, including 0 -- the spine is walked
+        one axis step at a time rather than sampled, so no two consecutive
+        stamps can meet at a corner and no gap can open however sharply the
+        path turns or however coarsely `points` samples it. That is the whole
+        reason to reach for this over `line`: the connectivity is by
+        construction rather than something you check afterwards and hope.
+
+        `points` may be floats; they are rounded to the lattice. `radius` is
+        the radius at the first point and `end_radius` at the last, defaulting
+        to no taper, interpolated over the spine and raised to `taper` (> 1
+        keeps the tube fat and closes late, < 1 pinches early).
+
+        Connecting to something else is a separate question, and the trick is
+        the same one: run the endpoints *inside* the other object rather than
+        onto its surface. A path that starts within a shell's inner boundary
+        and passes outside its outer boundary must put a voxel in the shell,
+        because the spine advances one voxel at a time. An endpoint placed on
+        the surface can miss it by one and float.
+        """
+        pts = [tuple(int(round(v)) for v in p) for p in points]
+        if len(pts) < 2:
+            raise ValueError("a tube needs at least two points")
+        spine = [pts[0]]
+        for a, b in zip(pts, pts[1:]):
+            spine.extend(shapes._walk6(a, b)[1:])
+
+        n = max(len(spine) - 1, 1)
+        r1 = radius if end_radius is None else end_radius
+        balls = {}
+        out = set()
+        for i, (x, y, z) in enumerate(spine):
+            r = round(radius + (r1 - radius) * (i / n) ** taper, 3)
+            ball = balls.get(r)
+            if ball is None:
+                ball = balls[r] = shapes.ellipsoid((0, 0, 0), (r, r, r))
+            out |= {(x + dx, y + dy, z + dz) for dx, dy, dz in ball}
+        return out
+
+    @staticmethod
     def where(a, b, predicate):
         """Every coordinate in the box `a`..`b` for which predicate(x,y,z) is true.
 
@@ -564,6 +1021,43 @@ def bounds(coords):
     return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
 
 
+def _flood(coords, seed):
+    """Face-adjacent flood fill over `coords`, starting at `seed`."""
+    seen = {seed}
+    stack = [seed]
+    while stack:
+        x, y, z = stack.pop()
+        for n in ((x + 1, y, z), (x - 1, y, z), (x, y + 1, z),
+                  (x, y - 1, z), (x, y, z + 1), (x, y, z - 1)):
+            if n in coords and n not in seen:
+                seen.add(n)
+                stack.append(n)
+    return seen
+
+
+def components(coords):
+    """Face-connected components of a coordinate set, largest first.
+
+    The coordinate-set twin of `Model.components`, for checking a shape before
+    it is ever painted -- which is where a generated shape that came apart is
+    cheapest to catch.
+    """
+    remaining = set(coords)
+    out = []
+    while remaining:
+        part = _flood(remaining, next(iter(remaining)))
+        out.append(part)
+        remaining -= part
+    return sorted(out, key=len, reverse=True)
+
+
+def _unit(v):
+    n = math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
+    if n == 0:
+        raise ValueError("cannot normalize a zero vector")
+    return (v[0] / n, v[1] / n, v[2] / n)
+
+
 # --------------------------------------------------------------------------
 # model
 # --------------------------------------------------------------------------
@@ -615,6 +1109,12 @@ class Model:
 
     def line(self, a, b, color, **kw):
         return self.add(shapes.line(a, b, **kw), color)
+
+    def rock(self, center, radii, color, **kw):
+        return self.add(shapes.rock(center, radii, **kw), color)
+
+    def tube(self, points, radius, color, **kw):
+        return self.add(shapes.tube(points, radius, **kw), color)
 
     def voxel(self, pos, color):
         return self.add({tuple(pos)}, color)
@@ -824,16 +1324,7 @@ class Model:
 
     def _flood(self, seed):
         """Face-adjacent flood fill over filled voxels, starting at `seed`."""
-        seen = {seed}
-        stack = [seed]
-        while stack:
-            x, y, z = stack.pop()
-            for n in ((x + 1, y, z), (x - 1, y, z), (x, y + 1, z),
-                      (x, y - 1, z), (x, y, z + 1), (x, y, z - 1)):
-                if n in self.voxels and n not in seen:
-                    seen.add(n)
-                    stack.append(n)
-        return seen
+        return _flood(self.voxels, seed)
 
     def detached(self, seed=None):
         """Voxels not reachable from `seed`; empty means one solid piece.
@@ -854,13 +1345,45 @@ class Model:
 
     def components(self):
         """Connected components as sets of coordinates, largest first."""
-        remaining = set(self.voxels)
+        return components(self.voxels)
+
+    def radial_profile(self, center, direction, normal, r_lo, r_hi,
+                       step=1.0, search=3):
+        """Colors met walking outward from `center`, as [(radius, name), ...].
+
+        The check a voxel count cannot make, for anything built in radial
+        layers -- a ring system, a tree stump, a dartboard, a gasket, a
+        layered cake. "31,000 voxels" is equally true of a ring system with
+        its gap in the wrong place, its bands in the wrong order, or its gap
+        painted black; a radial color walk is false of all three.
+
+        `direction` is the in-plane direction to walk and `normal` is the
+        plane's normal; both may be any length. Each radius is probed up to
+        `search` voxels along the normal, because a plane that is not
+        axis-aligned lands between lattice points and the voxel that was
+        actually written is a step off the ideal one. The probe works outward
+        from the plane and takes the nearest hit, so a thick disc reports the
+        color at the radius asked for rather than whatever the far face of the
+        search window happened to hold. `None` means nothing was in range.
+        """
+        d = _unit(direction)
+        n = _unit(normal)
+        offsets = [0]
+        for k in range(1, search + 1):
+            offsets += [-k, k]
         out = []
-        while remaining:
-            component = self._flood(next(iter(remaining)))
-            out.append(component)
-            remaining -= component
-        return sorted(out, key=len, reverse=True)
+        r = r_lo
+        while r <= r_hi + 1e-9:
+            found = None
+            for k in offsets:
+                p = tuple(int(round(center[i] + r * d[i] + k * n[i]))
+                          for i in range(3))
+                if p in self.voxels:
+                    found = self.palette.name(self.voxels[p])
+                    break
+            out.append((r, found))
+            r += step
+        return out
 
     # -- io -----------------------------------------------------------------
 

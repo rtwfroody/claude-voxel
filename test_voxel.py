@@ -1,12 +1,15 @@
 """Tests for voxel.py. Run directly (python3 test_voxel.py) or under pytest."""
 
+import math
 import os
 import struct
 import sys
 import tempfile
 
-from voxel import (MAX_DIM, Model, Palette, Scene, bounds, mirror, parse_color,
-                   rotate90, scale, shapes, translate, _walk_chunks)
+from voxel import (MAX_DIM, Model, Palette, Scene, bounds, chroma, components,
+                   disc_average, fbm3, luma, match_histogram, mirror, noise3,
+                   parse_color, ramp_at, relight, rotate90, scale, scale_color,
+                   shapes, to_hex, translate, weighted_quantiles, _walk_chunks)
 
 
 def _tmp(name="t.vox"):
@@ -738,6 +741,407 @@ def test_load_ignores_the_scene_graph_when_there_is_none():
     path = _tmp()
     m.save(path)
     assert set(Model.load(path).voxels) == set(m.voxels)
+
+
+# -- color arithmetic -------------------------------------------------------
+
+def test_to_hex_round_trips_through_parse_color():
+    assert to_hex("#3a6fd8") == "#3a6fd8"
+    assert to_hex((10, 20, 30)) == "#0a141e"
+    assert to_hex((10, 20, 30, 128)) == "#0a141e80", "alpha survives"
+    assert parse_color(to_hex("blue")) == parse_color("blue")
+
+
+def test_luma_and_chroma():
+    assert luma("#ffffff") == 255.0
+    assert luma("#000000") == 0.0
+    assert chroma("#808080") == 0.0, "a grey has no chroma"
+    assert chroma("#ff0000") == 255.0
+
+
+def test_relight_holds_chroma_while_scale_color_does_not():
+    """The distinction that cost a real bug: both move luma, one moves chroma."""
+    c = "#8a5f30"
+    k = 1.4
+    lit, scaled = relight(c, k), scale_color(c, k)
+
+    assert abs(luma(lit) - luma(c) * k) < 1.0, "relight scales luma by k"
+    assert abs(luma(scaled) - luma(c) * k) < 1.0, "so does scale_color"
+
+    assert abs(chroma(lit) - chroma(c)) < 1.0, "relight leaves chroma alone"
+    assert abs(chroma(scaled) - chroma(c) * k) < 1.0, "scale_color drags it along"
+    assert chroma(scaled) > chroma(lit) + 10, "and the two really do differ"
+
+
+def test_scale_color_preserves_hue_ratios():
+    assert to_hex(scale_color((100, 50, 25), 0.5)) == to_hex((50, 25, 12.5))
+
+
+def test_color_ops_clamp_and_keep_alpha():
+    assert parse_color(scale_color((200, 200, 200, 77), 4.0)) == (255, 255, 255, 77)
+    assert parse_color(relight((10, 10, 10, 77), -5.0)) == (0, 0, 0, 77)
+
+
+def test_color_ops_keep_full_precision_until_painted():
+    """A color op is usually the head of a chain; rounding each step propagates.
+
+    Scaling by 1/3 and back by 3 must return the original color. Rounding at
+    each step loses it -- and the loss is one count in a channel, which is far
+    too small to see and far too small for any check to catch, yet it moves
+    every color derived from the result.
+    """
+    base = (201.47750366666637, 182.77333799999977, 48.914173041666565)
+    assert to_hex(scale_color(scale_color(base, 1 / 3.0), 3.0)) == to_hex(base)
+
+    # ramp -> integrate -> tint is the chain that caught this. The mean's
+    # green lands on 182.77; rounding it to 183 before tinting shifts every
+    # tint derived from it.
+    ramp = [(0.0, "#f3ed9b"), (0.5, "#e4da54"), (0.8, "#c4ad13"),
+            (0.95, "#9b7d02")]
+    mean = disc_average(ramp)
+    assert to_hex(mean) == "#c9b731"
+    assert abs(mean[1] - 182.77) < 0.01, "the mean itself is not integral"
+    assert to_hex(scale_color(mean, 1.02)) == "#ceba32", "the end of the chain"
+    rounded_first = scale_color(parse_color(mean), 1.02)
+    assert to_hex(rounded_first) != "#ceba32", \
+        "rounding the mean first really does move the tint"
+
+
+def test_parse_color_rounds_floats_rather_than_truncating():
+    assert parse_color((10.6, 20.4, 30.5)) == (11, 20, 30, 255)
+    assert parse_color((10, 20, 30)) == (10, 20, 30, 255), "ints are untouched"
+
+
+def test_ramp_at_interpolates_and_clamps():
+    ramp = [(0.0, (0, 0, 0)), (1.0, (100, 200, 40))]
+    assert ramp_at(ramp, 0.5) == (50, 100, 20, 255)
+    assert ramp_at(ramp, -3.0) == (0, 0, 0, 255), "clamped below"
+    assert ramp_at(ramp, 9.0) == (100, 200, 40, 255), "clamped above"
+
+
+def test_ramp_at_rejects_an_unsorted_ramp():
+    try:
+        ramp_at([(1.0, "red"), (0.0, "blue")], 0.5)
+    except ValueError:
+        return
+    raise AssertionError("an unsorted ramp should raise, not silently misread")
+
+
+def test_disc_average_is_area_weighted_not_a_table_average():
+    """Weight goes as u, so 75% of a disc's area is outside u = 0.5."""
+    ramp = [(0.0, (255, 255, 255)), (1.0, (0, 0, 0))]
+    got = disc_average(ramp)[0]
+    assert abs(got - 85) <= 1, "linear black-to-white ramp averages to 1/3, not 1/2"
+
+    # Half-white/half-black by radius: the outer half is three quarters of it.
+    ramp = [(0.0, (255, 255, 255)), (0.4999, (255, 255, 255)),
+            (0.5, (0, 0, 0)), (1.0, (0, 0, 0))]
+    assert abs(disc_average(ramp)[0] - 64) <= 2
+
+
+# -- matching onto measured colors -----------------------------------------
+
+def test_weighted_quantiles_snaps_cuts_to_whole_values():
+    """A tied group must not be split, and no bucket may come out empty."""
+    weights = {10: 5.0, 20: 5.0, 30: 5.0, 40: 5.0}
+    assert weighted_quantiles(weights, [0.5]) == [20]
+    # 0.6 sits inside the value-30 group; it snaps to a boundary either way.
+    assert weighted_quantiles(weights, [0.6]) in ([20], [30])
+    assert weighted_quantiles(weights, [0.25, 0.5, 0.75]) == [10, 20, 30]
+
+
+def test_weighted_quantiles_respects_weight_not_count():
+    """One value covering most of the picture must pull the cut onto itself."""
+    weights = {1: 0.01, 2: 0.90, 3: 0.09}
+    assert weighted_quantiles(weights, [0.5]) == [2]
+
+
+def test_weighted_quantiles_keeps_every_bucket_non_empty():
+    """The bug this was written for: two cuts landing on the same value.
+
+    Picking each cut independently as "the boundary nearest my fraction" is
+    the obvious implementation and it collapses whenever one value dominates
+    or the fractions crowd together -- it returns [20, 20, 30] for the first
+    case here and [0, 0, 0] for the second. A repeated cut is an empty bucket,
+    which silently drops a color from the result with no other symptom.
+    """
+    dominant = {10: 0.05, 20: 0.60, 30: 0.15, 40: 0.15, 50: 0.05}
+    assert weighted_quantiles(dominant, [0.50, 0.60, 0.80]) == [20, 30, 40]
+    assert weighted_quantiles(dominant, [0.90, 0.95]) == [30, 40]
+
+    crowded = weighted_quantiles({i: 1.0 for i in range(4)}, [0.01, 0.02, 0.03])
+    assert crowded == sorted(set(crowded)) and len(crowded) == 3
+
+
+def test_weighted_quantiles_raises_rather_than_emptying_a_bucket():
+    try:
+        weighted_quantiles({1: 1.0, 2: 1.0}, [0.2, 0.5, 0.8])
+    except ValueError:
+        return
+    raise AssertionError("3 cuts out of 2 values must raise, not lose a color")
+
+
+def test_match_histogram_reproduces_a_known_distribution():
+    """Rank in, rank out: equal shares land on evenly spaced ramp midpoints."""
+    ramp = [(0.0, (0, 0, 0)), (1.0, (200, 200, 200))]
+    out = match_histogram({c: 1.0 for c in "abcd"}, ramp)
+    assert [out[c][0] for c in "abcd"] == [25, 75, 125, 175]
+
+
+def test_match_histogram_beats_a_linear_rescale_on_a_skewed_source():
+    """The finding this exists for: matching by rank, not by range.
+
+    The source is bottom-heavy -- its darkest value covers 70% of the picture
+    -- while the target's brightness is spread evenly. A linear rescale of the
+    source's *range* places the four values at an even 0/85/170/255 whatever
+    their coverage, and paints an area-weighted mean of 51 against a target
+    mean of 127.5: less than half as bright, from a mapping that has the right
+    extremes, the right structure and a plausible spread.
+
+    The rank match reproduces the target's mean exactly, and does so for any
+    set of shares -- placing each value at the midpoint of the span it covers
+    makes the area-weighted mean identically the target's own.
+    """
+    weights = {"a": 0.70, "b": 0.10, "c": 0.10, "d": 0.10}
+    ramp = [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))]
+    out = match_histogram(weights, ramp)
+    got = [out[c][0] for c in "abcd"]
+    assert got == sorted(got), "rank order is preserved"
+
+    mean = sum(weights[c] * out[c][0] for c in "abcd")
+    assert abs(mean - 127.5) <= 1.0, "the target's own mean, reproduced"
+
+    linear = dict(zip("abcd", (0, 85, 170, 255)))
+    lin_mean = sum(weights[c] * linear[c] for c in "abcd")
+    assert abs(lin_mean - 127.5) > 70, "what a linear rescale would have done"
+
+    # 70% of the area is below b, so b sits at the 0.75 mark, not at 0.33.
+    assert abs(got[1] - 0.75 * 255) <= 2
+
+
+def test_match_histogram_preserves_the_target_mean_for_any_shares():
+    ramp = [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))]
+    for shares in ([0.5, 0.3, 0.15, 0.05], [0.01] * 4 + [0.96], [1.0]):
+        weights = {i: s for i, s in enumerate(shares)}
+        out = match_histogram(weights, ramp)
+        mean = sum(s * out[i][0] for i, s in weights.items()) / sum(shares)
+        assert abs(mean - 127.5) <= 1.0, f"{shares} drifted off the target mean"
+
+
+def test_match_histogram_uses_the_measured_distribution():
+    """`distribution` bends rank onto the target's own spread."""
+    ramp = [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))]
+    weights = {c: 1.0 for c in "ab"}
+    flat = match_histogram(weights, ramp)
+    # A target whose brightness is crushed into the top of the ramp.
+    bent = match_histogram(weights, ramp, distribution=[(0.0, 0.8), (1.0, 1.0)])
+    assert bent["a"][0] > flat["a"][0] and bent["b"][0] > flat["b"][0]
+
+
+def test_match_histogram_key_orders_by_something_other_than_the_value():
+    palette = {"a": "#ffffff", "b": "#000000"}
+    ramp = [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))]
+    out = match_histogram({c: 1.0 for c in "ab"}, ramp,
+                          key=lambda c: luma(palette[c]))
+    assert out["b"][0] < out["a"][0], "'b' is darker, so it ranks first"
+
+
+# -- noise ------------------------------------------------------------------
+
+def test_noise_is_seeded_and_reproducible():
+    assert noise3(1.5, 2.5, 3.5, 7) == noise3(1.5, 2.5, 3.5, 7)
+    assert noise3(1.5, 2.5, 3.5, 7) != noise3(1.5, 2.5, 3.5, 8)
+    assert all(0.0 <= noise3(i * 0.37, i * 0.11, i * 0.83, 3) <= 1.0
+               for i in range(200))
+
+
+def test_fbm3_is_not_uniform_so_thresholds_are_not_area_fractions():
+    """The trap in the docstring, asserted: the field piles up in the middle."""
+    vals = sorted(fbm3(i * 0.31, i * 0.17, i * 0.53, 5) for i in range(2000))
+    p20, p50, p80 = vals[400], vals[1000], vals[1600]
+    assert 0.35 < p20 < 0.45 and 0.47 < p50 < 0.57 and 0.57 < p80 < 0.67
+    below = sum(1 for v in vals if v <= 0.2) / len(vals)
+    assert below < 0.02, "a 0.2 threshold selects far less than 20%"
+
+
+# -- rock and tube ----------------------------------------------------------
+
+def test_rock_is_lumpy_but_stays_near_its_radii():
+    c = shapes.rock((0, 0, 0), (12, 5, 5), seed=1)
+    smooth = shapes.ellipsoid((0, 0, 0), (12, 5, 5))
+    assert c != smooth, "a rock is not an ellipsoid"
+    lo, hi = bounds(c)
+    assert 20 <= hi[0] - lo[0] + 1 <= 34, "long axis stays roughly 2r"
+    assert 8 <= hi[1] - lo[1] + 1 <= 15, "and the short axes stay short"
+
+
+def test_rock_is_one_connected_piece_even_when_tiny():
+    """At radii near a voxel the noise really does shear a corner off.
+
+    Unfiltered, (1.2, 1.0, 0.8) comes apart on seed 53 at the default
+    roughness and on 8 of 60 seeds at 0.45 -- which in a field of rubble shows
+    up as phantom extra objects in the component count, not as a visible
+    defect. Both ranges are swept here so the filter cannot go quiet.
+    """
+    for roughness in (0.30, 0.45):
+        for seed in range(80):
+            c = shapes.rock((0, 0, 0), (1.2, 1.0, 0.8), seed=seed,
+                            roughness=roughness)
+            assert len(components(c)) == 1, \
+                f"seed {seed} at roughness {roughness} left a fragment"
+
+
+def test_rock_is_reproducible_and_seed_dependent():
+    assert shapes.rock((0, 0, 0), (6, 4, 4), seed=2) == \
+        shapes.rock((0, 0, 0), (6, 4, 4), seed=2)
+    assert shapes.rock((0, 0, 0), (6, 4, 4), seed=2) != \
+        shapes.rock((0, 0, 0), (6, 4, 4), seed=3)
+
+
+def test_tube_is_one_connected_piece_however_it_turns():
+    """The guarantee: sub-voxel-free, so no corner-only join can appear."""
+    paths = [
+        [(0, 0, 0), (30, 7, 3)],                       # a shallow diagonal
+        [(0, 0, 0), (1, 1, 1), (2, 2, 2), (3, 3, 3)],  # pure diagonal
+        [(0, 0, 0), (10, 0, 0), (10, 10, 0), (10, 10, 10)],   # right angles
+        [(0, 0, 0), (5, 5, 5), (-5, 5, -5), (5, -5, 5)],      # reversals
+    ]
+    for path in paths:
+        for radius in (0, 0.5, 1, 2.5):
+            c = shapes.tube(path, radius)
+            assert len(components(c)) == 1, f"{path} at r={radius} came apart"
+
+
+def test_tube_at_radius_zero_is_a_face_connected_thread():
+    c = shapes.tube([(0, 0, 0), (9, 9, 9)], 0)
+    assert len(components(c)) == 1
+    assert len(components(shapes.line((0, 0, 0), (9, 9, 9)))) > 1, \
+        "which is exactly what line does not give you"
+
+
+def test_tube_tapers_from_end_to_end():
+    c = shapes.tube([(0, 0, 0), (40, 0, 0)], 4, end_radius=0)
+    at = lambda x: len({p for p in c if p[0] == x})
+    assert at(0) > at(20) > at(39), "cross-section shrinks along the path"
+    assert at(39) == 1, "and closes to a single voxel"
+
+
+def test_tube_reaches_inside_both_endpoints():
+    """Endpoints are included, which is what lets a tube be run into a shell."""
+    c = shapes.tube([(0, 0, 0), (6, 0, 0)], 0)
+    assert (0, 0, 0) in c and (6, 0, 0) in c
+
+
+def test_model_rock_and_tube_paint():
+    m = Model()
+    m.rock((0, 0, 0), (4, 3, 3), "stone", seed=1)
+    m.tube([(0, 0, 10), (0, 0, 20)], 1, "copper")
+    assert len(m.color_histogram()) == 2
+
+
+# -- coordinate-set connectivity -------------------------------------------
+
+def test_components_of_a_coordinate_set():
+    coords = shapes.box((0, 0, 0), (2, 2, 2)) | shapes.box((9, 9, 9), (10, 10, 10))
+    parts = components(coords)
+    assert [len(p) for p in parts] == [27, 8], "largest first"
+    assert components(set()) == []
+
+
+def test_components_is_face_adjacent_only():
+    assert len(components({(0, 0, 0), (1, 1, 1)})) == 2, "corners do not join"
+
+
+def test_model_components_still_matches_the_coordinate_set_version():
+    m = Model()
+    m.box((0, 0, 0), (2, 2, 2), "red")
+    m.box((9, 9, 9), (10, 10, 10), "blue")
+    assert m.components() == components(m.coords())
+    assert len(m.detached()) == 8
+
+
+# -- radial profile ---------------------------------------------------------
+
+def test_radial_profile_reads_bands_out_in_order():
+    m = Model()
+    for r, color in ((4, "red"), (8, "green"), (12, "blue")):
+        m.add(shapes.cylinder((0, 0, 0), r, 1) - shapes.cylinder((0, 0, 0), r - 4, 1),
+              color)
+    got = m.radial_profile((0, 0, 0), (1, 0, 0), (0, 0, 1), 1, 11, step=2)
+    assert [c for _, c in got] == ["red", "red", "green", "green", "blue", "blue"]
+
+
+def test_radial_profile_reports_a_gap_as_none():
+    m = Model()
+    m.add(shapes.cylinder((0, 0, 0), 12, 1) - shapes.cylinder((0, 0, 0), 6, 1),
+          "red")
+    got = dict(m.radial_profile((0, 0, 0), (1, 0, 0), (0, 0, 1), 0, 12, step=2))
+    assert got[0] is None and got[2] is None, "the hole is reported as a hole"
+    assert got[8] == "red"
+
+
+def _unit3(v):
+    n = math.sqrt(sum(c * c for c in v))
+    return tuple(c / n for c in v)
+
+
+def _tilted_annulus(normal, r_in, r_out, thickness=2):
+    """A flat ring in a plane that is not axis-aligned.
+
+    Built the way a tilted plane has to be: project along the axis the normal
+    leans on most and solve the plane equation for the third component, so
+    every column gets exactly one run of voxels. Sampling an inequality
+    instead develops holes as the plane steepens.
+    """
+    n = _unit3(normal)
+    a = max(range(3), key=lambda i: abs(n[i]))
+    u, v = [i for i in range(3) if i != a]
+    lim = int(math.ceil(r_out)) + thickness + 2
+    out = set()
+    for du in range(-lim, lim + 1):
+        for dv in range(-lim, lim + 1):
+            base = int(round(-(n[u] * du + n[v] * dv) / n[a]))
+            for k in range(thickness):
+                d = [0, 0, 0]
+                d[u], d[v] = du, dv
+                d[a] = base + k - (thickness - 1) // 2
+                par = sum(d[i] * n[i] for i in range(3))
+                perp2 = sum(c * c for c in d) - par * par
+                if r_in * r_in <= perp2 <= r_out * r_out:
+                    out.add(tuple(d))
+    return out
+
+
+def test_radial_profile_searches_across_a_tilted_plane():
+    """A plane off the lattice lands between voxels; without the search along
+    the normal, radii that are plainly filled report as empty."""
+    tilt, az = math.radians(40.0), math.radians(20.0)
+    normal = _unit3((math.sin(tilt) * math.sin(az),
+                     -math.sin(tilt) * math.cos(az), math.cos(tilt)))
+    m = Model()
+    m.add(_tilted_annulus(normal, 20, 40), "red")
+
+    e1 = _unit3(tuple(1.0 * (i == 0) - normal[0] * normal[i] for i in range(3)))
+    e2 = (normal[1] * e1[2] - normal[2] * e1[1],
+          normal[2] * e1[0] - normal[0] * e1[2],
+          normal[0] * e1[1] - normal[1] * e1[0])
+    walk = tuple(0.3 * e1[i] + 0.95 * e2[i] for i in range(3))
+
+    holes = lambda s: [r for r, c in m.radial_profile(
+        (0, 0, 0), walk, normal, 21, 39, step=1.0, search=s) if c is None]
+    assert holes(0), "the unsearched probe must miss, or this proves nothing"
+    assert not holes(3), "the search must find every filled radius"
+
+
+def test_radial_profile_takes_the_nearest_hit_not_the_far_edge():
+    """A thick disc must report the radius asked for, not the search window."""
+    m = Model()
+    m.add(shapes.cylinder((0, 0, -4), 20, 9), "red")
+    m.add(shapes.cylinder((0, 0, 4), 20, 1), "blue")     # a lid 4 above
+    got = m.radial_profile((0, 0, 0), (1, 0, 0), (0, 0, 1), 5, 15, step=5,
+                           search=6)
+    assert [c for _, c in got] == ["red", "red", "red"], \
+        "probing outward from the plane keeps the lid out of the answer"
 
 
 # -- runner ----------------------------------------------------------------

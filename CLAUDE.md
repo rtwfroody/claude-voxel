@@ -48,24 +48,70 @@ Right-handed, **Z up**: `+X` right, `+Y` away from viewer, `+Z` up. `preview()`
 ```
 Model()                       .voxel(pos,c) .box(a,b,c) .sphere(ctr,r,c)
                               .ellipsoid(ctr,(rx,ry,rz),c) .cylinder(base,r,h,c)
-                              .cone(base,r,h,c) .pyramid(base,hw,h,c)
-                              .torus(ctr,R,r,c) .line(a,b,c)
+                              .cone(base,r,h,c) .frustum(base,r,h,c)
+                              .pyramid(base,hw,h,c) .torus(ctr,R,r,c) .line(a,b,c)
+                              .wedge(a,b,c) .polygon(pts,off,h,c)
+                              .helix(base,r,h,c) .rock(ctr,(rx,ry,rz),c)
+                              .tube(points,r,c)
   edits                       .add(coords,c) .add_under(coords,c) .remove(coords)
                               .keep(coords) .merge(other,offset) .mirror(axis,at)
-                              .translate(off) .copy()
+                              .translate(off) .rotate90(axis,turns) .scale(n)
+                              .recolor(old,new) .center(axes) .copy()
   queries                     len() `in` .coords() .bounds .size .stats()
-                              .color_histogram() .detached() .components()
+                              .color_histogram() .surface(facing) .support(coords)
+                              .detached() .components()
+                              .radial_profile(ctr,dir,normal,r_lo,r_hi)
   io                          .save(path) Model.load(path) Model.from_layers(...)
                               .preview(max_dim=48, ansi=False, views=(...))
 
 Scene()                       .place(model,offset) .voxel(pos,c) .add(coords,c)
   CHUNK=256                   len() .bounds .size .chunk_stats() .save(path)
 
-shapes.*                      box sphere ellipsoid cylinder cone pyramid torus
-                              line where silhouette_hull(front,side,top)
+shapes.*                      box sphere ellipsoid cylinder cone frustum pyramid
+                              torus line wedge polygon helix rock tube where
+                              silhouette_hull(front,side,top)
                               -- all return set[(x,y,z)]
-transforms                    translate mirror rotate90 scale bounds
+transforms                    translate mirror rotate90 scale bounds components
+color                         parse_color to_hex luma chroma
+                              scale_color(c,k)  x every channel; chroma scales too
+                              relight(c,k)      +one offset; chroma held fixed
+                              ramp_at(ramp,t) disc_average(ramp)
+                              weighted_quantiles(weights,fractions)
+                              match_histogram(weights,ramp,distribution)
+noise                         noise3(x,y,z,seed) fbm3(x,y,z,seed,octaves=4)
 ```
+
+`rock` is the only shape that is not smooth — a triaxial ellipsoid chewed up by
+noise, for boulders, rubble and anything that shouldn't look manufactured.
+`tube` sweeps a ball along a polyline and is **connected by construction**
+(the spine steps one axis at a time), which `line` is not; run its endpoints
+*inside* whatever it should attach to and the join cannot float either.
+
+## Working from a reference photo
+
+Measure colors off the reference, then move them with the operation that
+matches the physics, because the two look interchangeable and are not:
+
+- **`scale_color(c, k)`** multiplies every channel. Chroma scales with
+  brightness, which is what light does — use it for albedo, shading, and
+  tinting one base into a family.
+- **`relight(c, k)`** adds one offset to every channel. Chroma is unchanged —
+  use it when the reference's *exposure* is wrong but its color is believed.
+
+Both scale `luma` by `k`, so only `chroma` tells them apart afterwards. Getting
+this backwards turned a 1.6x brightness fix into a 1.6x saturation increase.
+
+`disc_average(ramp)` reduces a measured centre-to-rim ramp to the one color a
+flat disc should be. Area goes as the radius, so 75% of a disc lies outside
+half-radius and reading the middle of the table lands far too bright.
+
+To reuse someone else's map or image for its *structure* while taking every
+color from your own measurements, use `match_histogram` — never a linear
+rescale of the source's range onto the measured range. That silently assumes
+the two distributions have the same shape; when they don't, the result has the
+right extremes, the right structure, a plausible spread, and is wrong. Feed it
+weights that reflect real area (an equirectangular map's rows are not
+equal-area — weight by cos(lat) or the poles get five times their share).
 
 `Scene` is the way past the 256-per-axis cap: it bins world coordinates into
 256³ chunks and writes a multi-model file, so 1024³ is 64 chunks. `place()`
@@ -114,7 +160,7 @@ object is right. Every bug so far was invisible in it. Run these:
    ```python
    n = sum(1 for p in footprint if (p[0], p[1], surface_z) in m)
    ```
-5. **`python3 test_voxel.py`** after touching `voxel.py` (66 tests).
+5. **`python3 test_voxel.py`** after touching `voxel.py` (109 tests).
 
 For legibility of text or fine detail, project just those voxels rather than
 previewing the whole model:
@@ -133,6 +179,12 @@ cells = {(x,z) for (x,y,z),i in m.voxels.items() if m.palette.rgba(i)==target}
 - **Running a check on the fixed model proves the model is sound, not that the
   check would have caught the bug.** To claim a check catches something, run
   it against the broken build.
+- **`fbm3` is not uniform on [0, 1].** It piles up in the middle — measured
+  p20 0.40, p50 0.52, p80 0.62 — so a threshold at 0.2 selects nowhere near
+  20%. Thresholds picked by intuition hand most of the surface to the outer
+  buckets; one body ended up with its base color on 17% of its front face.
+  Sample the field over the coordinates you will actually paint and take
+  `weighted_quantiles` of that. Two separate builds hit this.
 - **Mirror seam.** `m.mirror("x", at=0)` reflects across `x=0`, and column 0 is
   its own mirror image. Parts crossing the centreline must start *at* `x=0`;
   starting at `x=1` leaves a one-voxel gap down the middle.
