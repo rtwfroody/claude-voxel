@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 
+# A local working log of problems solved and traps hit -- personal notes, not
+# documentation of this repo. The lessons worth publishing go in CLAUDE.md.
+notes.md
+
 # playground/ is the scratch space for building new models -- see
 # playground/README.md, which is the one file in there that IS tracked.
 # Everything else is local: sources, multi-million-voxel .vox output, one-off

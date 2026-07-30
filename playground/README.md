@@ -37,22 +37,14 @@ Two ways to reach `voxel.py`, which lives one level up from here:
   ```
   python3 -m playground.lighthouse.build
   ```
-  This is what `seattle_center/` does. It needs no `sys.path` fiddling at all,
-  because running from the root already puts `voxel.py` on the path — and it
-  keeps working if the directory later moves.
+  Prefer this once there is more than one file. It needs no `sys.path` fiddling
+  at all, because running from the root already puts `voxel.py` on the path —
+  and it keeps working if the directory later moves.
 
 Don't hard-code the number of levels up to `voxel.py` outside of that first
-snippet. `spaceship/shipkit.py` did, as a bare `".."`, and it broke the moment
-the pack moved down one level into this directory; it now searches upward for
-the directory containing `voxel.py`.
-
-## What lives here now
-
-| directory | what |
-| --- | --- |
-| `seattle_center/` | a 1024³ post-apocalyptic Seattle Center; multi-million voxels, a ~15 MB `.vox`, and its own `devscripts/`. Build with `python3 -m playground.seattle_center.build`. Watch memory — it is built to a ~7M voxel ceiling. |
-| `spaceship/` | a modular-spaceship game asset pack: hulls, systems and enemies that snap together on sockets. `python3 playground/spaceship/build_all.py`. |
-| `world_market/` | a 149×215×66 market street — eight regional stalls, shophouse facades, a fountain and a bakery, ~356k voxels in a single `Model`. Built by eight parallel authors against `spec.md`; `python3 -m playground.world_market.build`, then `python3 -m playground.world_market.check` for the 33-check suite. |
+snippet. A helper module that did, as a bare `".."`, broke the moment its pack
+moved down one level into this directory. If a module really must find the root
+itself, search upward for the directory containing `voxel.py`.
 
 ## Promoting to `examples/`
 
