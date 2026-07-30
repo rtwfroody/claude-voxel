@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 
+# Per-agent memory written by Claude Code as it works here. Local state, not
+# project documentation -- the skills under .claude/skills/ are the tracked part.
+.claude/agent-memory/
+
 # A local working log of problems solved and traps hit -- personal notes, not
 # documentation of this repo. The lessons worth publishing go in CLAUDE.md.
 notes.md
