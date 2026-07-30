@@ -16,6 +16,63 @@ generates one-off diagnostic scripts and large `.vox` files that should not
 land in the repo. `playground/README.md` covers the import patterns and how to
 promote a finished model to `examples/`.
 
+## Step 0 — agree the visual style before building anything
+
+**There is no house style.** The models in this repo do not share one, and
+nothing in `CLAUDE.md` or `notes.md` implies a default. Do not infer one from
+`examples/` — `omri_cake.py` is a reference for *code* structure (build(),
+named constants, seeded randomness), not for how a model should look.
+
+So the first action of a build, before any spec, palette or geometry, is to
+**ask the user which style to work in** — one `AskUserQuestion` with a short
+menu. Always include "match an existing `.vox`" as one of the options. A
+reasonable menu:
+
+- **Match an existing model** — the user names a `.vox` (or a directory in
+  `playground/`); measure it and match. Procedure below.
+- **Naturalistic / measured** — real-world colors sampled or recalled at real
+  chroma, subtle value shading, restrained palette. Photo references expected
+  (Part 2). This is the `pelican5` end of the spectrum.
+- **Stylized game asset** — bold saturated palette, flat regions, features
+  exaggerated for legibility at small size, readable silhouette over realism.
+- **Toy diorama** — chunky forms, few colors per object, oversized
+  characteristic features, deliberately low detail density.
+
+Offer the two or three that actually fit the subject rather than all four, and
+say which you would pick. If the user has already stated a style in the prompt
+("make it look like a pixel-art game", "photoreal-ish"), skip the question and
+record the choice instead.
+
+Style is not decoration — it fixes decisions that are expensive to reverse
+later, so pin all of these down and write them into the build's `spec.md`
+before the first line of geometry:
+
+| decision | why it must be settled first |
+| --- | --- |
+| voxels per metre | every prop's size table derives from it |
+| palette size and chroma ceiling per material class | a repaint late is a rebuild |
+| shading strategy (none / underside only / full value ramp) | affects how geometry is authored |
+| detail density (voxels per feature) | decides whether a fruit is 1 voxel or 4 |
+| outline or rim treatment, if any | interacts with the rim-shading trap |
+
+**To match an existing model**, measure it rather than eyeballing it:
+
+```python
+m = Model.load(path)
+print(m.stats())                                  # count, size, colors used
+for name, n in m.color_histogram():               # (color name, voxels), desc
+    r, g, b, _ = parse_color(name)
+    print(f"{name} {n:7d}  chroma {max(r,g,b)-min(r,g,b):3d}")
+```
+
+Take the chroma (`max(rgb) - min(rgb)`) and luma distribution over the
+histogram *weighted by voxel count* — an unweighted palette read overstates
+accent colors that occupy twenty voxels. Note voxels-per-feature on something
+identifiable, whether shading exists at all, and how many colors a single
+material uses. Render it (step 5's script) and look at it. Then write those
+numbers into `spec.md` as the target, and check the new model against them at
+the end.
+
 Two facts shape the whole workflow:
 
 1. **Geometric checks and visual critique catch disjoint bug classes.** A
@@ -261,6 +318,9 @@ unreferenced builds go wrong:
 ## Done means
 
 Geometric suite green **and** a final-round render critique with nothing but
-nitpicks **and** (if references exist) colors within measured tolerance. Then
+nitpicks **and** (if references exist) colors within measured tolerance **and**
+the style table from step 0 checked off against the finished model — a build
+that drifted off its agreed palette ceiling or detail density is not done, and
+the drift is only visible if the numbers were written down first. Then
 log anything newly learned in `notes.md` — including checks that didn't work
 and why.
