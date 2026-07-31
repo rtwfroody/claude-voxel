@@ -271,6 +271,52 @@ python3 voxel.py preview examples/robot.vox --ansi
 python3 voxel.py info examples/robot.vox
 ```
 
+## Rendering
+
+`m.render()` returns a PNG of the model as bytes, and writes it too if given a
+path. It is a plain orthographic rasterizer — flat-shaded cube faces, one
+light, a touch of ambient occlusion in the creases — written on `zlib` alone,
+so it needs no more than the rest of the library does.
+
+```python
+m.render("out.png", yaw=30, pitch=25)
+```
+
+`yaw` and `pitch` are degrees. **yaw=0 is `preview`'s front view**, the camera
+looking along +Y; yaw=90 moves it round to the -X side. `pitch` is elevation
+above the horizon, so **pitch=90 is the top view**, x right and +Y up, again
+as `preview` has it.
+
+`size` (default 512) is the long edge of the model's projected *bounding
+box*: the canvas crops to that box rather than padding out to a square, with
+`margin` of blank border on each edge. An organic shape that stays clear of
+the box corners therefore lands somewhat smaller than `size`.
+
+Two renders are only comparable if they share a camera, which is what `anchor`
+and `scale` are for:
+
+```python
+ANCHOR, SCALE = (0.5, 0.5, 0.5), 6      # pick once, keep for the build
+m.render("round3.png", anchor=ANCHOR, scale=SCALE)
+```
+
+`anchor` is a world point that lands on the exact center of the canvas (a
+voxel spans `[p, p+1]`, so its center is `p+0.5`), and `scale` is pixels per
+world unit, overriding `size` as the magnification. With both fixed, the same
+world point sits at the center of every render at the same size, so two rounds
+of a build — or the frames of a turntable — line up pixel for pixel even when
+their canvases don't match. The whole model always stays in frame; an
+off-center anchor just leaves more slack on one side.
+
+```sh
+python3 voxel.py render examples/robot.vox              # -> examples/robot.png
+python3 voxel.py render examples/robot.vox shot.png --size 800 --yaw 45
+python3 voxel.py render examples/robot.vox --view 0,0 --view 30,25
+python3 voxel.py render examples/robot.vox --anchor 8,8,12 --scale 6
+```
+
+`--view` may repeat, and names each file `<stem>_y<yaw>p<pitch>.png`.
+
 ## Connectivity
 
 Assembled models fail by having a part float away from what it should rest on,

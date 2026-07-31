@@ -5,11 +5,13 @@ import os
 import struct
 import sys
 import tempfile
+import zlib
 
 from voxel import (MAX_DIM, Model, Palette, Scene, bounds, chroma, components,
                    disc_average, fbm3, luma, match_histogram, mirror, noise3,
                    parse_color, ramp_at, relight, rotate90, scale, scale_color,
-                   shapes, to_hex, translate, weighted_quantiles, _walk_chunks)
+                   shapes, to_hex, translate, weighted_quantiles, _main,
+                   _walk_chunks)
 
 
 def _tmp(name="t.vox"):
@@ -594,6 +596,283 @@ def test_preview_downsamples_large_models():
 
 def test_preview_of_empty_model():
     assert Model().preview() == "empty model"
+
+
+# -- render (png) ----------------------------------------------------------
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+BG = bytes(parse_color("#e8e8e8")[:3])
+
+
+def _decode_png(data):
+    """(width, height, rows) from a filter-0 truecolor PNG. Rows are bytes."""
+    assert data[:8] == PNG_MAGIC
+    width = height = None
+    idat = bytearray()
+    off = 8
+    while off < len(data):
+        n = struct.unpack_from(">I", data, off)[0]
+        tag = data[off + 4:off + 8]
+        body = data[off + 8:off + 8 + n]
+        if tag == b"IHDR":
+            width, height, depth, ctype = struct.unpack_from(">IIBB", body, 0)
+            assert (depth, ctype) == (8, 2), "want 8-bit truecolor"
+        elif tag == b"IDAT":
+            idat += body
+        off += 12 + n                             # len + tag + body + crc
+        assert struct.unpack_from(">I", data, off - 4)[0] == \
+            zlib.crc32(tag + body) & 0xFFFFFFFF
+    raw = zlib.decompress(bytes(idat))
+    stride = width * 3
+    assert len(raw) == height * (stride + 1)
+    rows = []
+    for r in range(height):
+        p = r * (stride + 1)
+        assert raw[p] == 0, "every row must use filter 0"
+        rows.append(raw[p + 1:p + 1 + stride])
+    return width, height, rows
+
+
+def _pixels(rows, width):
+    """[(row, col, rgb), ...] for every pixel that is not the background."""
+    return [(r, c, row[c * 3:c * 3 + 3])
+            for r, row in enumerate(rows)
+            for c in range(width)
+            if row[c * 3:c * 3 + 3] != BG]
+
+
+def _of_hue(rows, width, channel):
+    """Pixels whose brightest channel is `channel` (0=r, 1=g, 2=b).
+
+    Shading multiplies all three channels by one factor, so which channel
+    leads survives it and identifies the color a pixel was painted with.
+    """
+    return [(r, c) for r, c, p in _pixels(rows, width)
+            if p[channel] == max(p) and p.count(max(p)) == 1]
+
+
+def test_render_writes_the_bytes_it_returns():
+    m = Model()
+    m.box((0, 0, 0), (3, 3, 3), "red")
+    path = _tmp("r.png")
+    data = m.render(path, size=40)
+    assert isinstance(data, (bytes, bytearray))
+    assert open(path, "rb").read() == data
+    w, h, rows = _decode_png(data)
+    assert len(rows) == h and len(rows[0]) == w * 3
+
+
+def test_render_crops_the_short_axis_to_the_content():
+    """size is the long edge of the content, not of a square canvas."""
+    m = Model()
+    m.box((0, 0, 0), (3, 0, 7), "red")          # 4 wide, 8 tall, seen head-on
+    w, h, _ = _decode_png(m.render(size=40, yaw=0, pitch=0))
+    # content 40 * (1 - 2*0.04) = 36.8 px tall, plus round(40*0.04) each edge
+    assert h == 41
+    assert w == 32, "4 wide would be 22 px; the 32 px floor holds it up"
+    assert h > w
+
+
+def test_render_puts_the_anchor_at_the_canvas_center():
+    m = Model()
+    m.voxel((0, 0, 0), "red")                    # the anchored voxel
+    m.box((1, 0, 0), (5, 0, 0), "white")         # lopsided, all to one side
+    m.box((0, 0, 1), (0, 0, 3), "white")
+    w, h, rows = _decode_png(m.render(size=64, yaw=0, pitch=0,
+                                      anchor=(0.5, 0.5, 0.5)))
+    at = _of_hue(rows, w, 0)
+    assert at, "the anchored voxel must be visible"
+    rs = [r for r, _ in at]
+    cs = [c for _, c in at]
+    assert min(cs) < w / 2 <= max(cs), "the anchor straddles the center column"
+    assert min(rs) < h / 2 <= max(rs), "and the center row"
+
+    # Centering on a lopsided model is only useful if it does not crop it.
+    border = ([(0, c) for c in range(w)] + [(h - 1, c) for c in range(w)]
+              + [(r, 0) for r in range(h)] + [(r, w - 1) for r in range(h)])
+    assert all(rows[r][c * 3:c * 3 + 3] == BG for r, c in border), \
+        "the canvas must still hold the whole model"
+
+
+def test_render_is_comparable_across_models_at_one_anchor_and_scale():
+    """The point of anchor+scale: two rounds of a build, overlayable."""
+    shot = dict(size=64, yaw=0, pitch=0, anchor=(0.5, 0.5, 0.5), scale=6)
+    first = Model()
+    first.voxel((0, 0, 0), "red")
+    first.box((1, 0, 0), (3, 0, 0), "white")
+    second = Model()
+    second.voxel((0, 0, 0), "red")               # the same voxel, same place
+    second.box((-4, 0, 0), (-1, 0, 5), "white")  # everything else moved
+
+    wa, ha, rows_a = _decode_png(first.render(**shot))
+    wb, hb, rows_b = _decode_png(second.render(**shot))
+    assert (wa, ha) != (wb, hb), "different bounds, so different canvases"
+    offsets = [{(r - h // 2, c - w // 2) for r, c in _of_hue(rows, w, 0)}
+               for rows, w, h in ((rows_a, wa, ha), (rows_b, wb, hb))]
+    assert offsets[0], "the shared voxel must be visible in both"
+    assert offsets[0] == offsets[1], \
+        "one anchor and one scale must put it at one offset from center"
+
+
+def test_render_scale_is_pixels_per_voxel():
+    m = Model()
+    m.voxel((0, 0, 0), "red")
+    w, _, rows = _decode_png(m.render(size=64, yaw=0, pitch=0, scale=8))
+    columns = {c for _, c, _ in _pixels(rows, w)}
+    assert len(columns) == 8, f"scale 8 is 8 px per voxel, not {columns}"
+
+
+def test_render_of_empty_model():
+    try:
+        Model().render(size=16)
+    except ValueError:
+        return
+    raise AssertionError("rendering an empty model must raise")
+
+
+def test_render_centers_the_model():
+    m = Model()
+    m.voxel((0, 0, 0), "red")
+    w, h, rows = _decode_png(m.render(size=48, yaw=30, pitch=25))
+    lit = _pixels(rows, w)
+    assert lit, "a voxel must leave marks on the canvas"
+    assert abs(sum(r for r, _, _ in lit) / len(lit) - h / 2) < 2
+    assert abs(sum(c for _, c, _ in lit) / len(lit) - w / 2) < 2
+
+
+def test_render_front_view_matches_preview_orientation():
+    """yaw=0 is preview's front: x to the right, z up."""
+    m = Model()
+    m.voxel((0, 0, 0), "red")
+    m.voxel((0, 0, 5), "blue")
+    m.voxel((6, 0, 0), "green")
+    w, _, rows = _decode_png(m.render(size=64, yaw=0, pitch=0))
+    up = _of_hue(rows, w, 2)                       # blue, at z=5
+    right = _of_hue(rows, w, 1)                    # green, at x=6
+    base = _of_hue(rows, w, 0)                     # red, at the origin
+    assert up and right and base
+    assert max(r for r, _ in up) < min(r for r, _ in base), "+z is up-screen"
+    assert min(c for _, c in right) > max(c for _, c in base), "+x is right"
+
+
+def test_render_top_view_matches_preview_orientation():
+    """pitch=90 is preview's top: x to the right, +y up, whatever the yaw.
+
+    Looking straight down leaves the screen basis under-determined, so the
+    camera rolls to a fixed up vector -- which is why yaw stops mattering.
+    """
+    m = Model()
+    m.voxel((0, 0, 0), "red")
+    m.voxel((0, 6, 0), "blue")
+    m.voxel((6, 0, 0), "green")
+    w, _, rows = _decode_png(m.render(size=64, yaw=0, pitch=90))
+    away = _of_hue(rows, w, 2)                     # blue, at y=6
+    right = _of_hue(rows, w, 1)                    # green, at x=6
+    base = _of_hue(rows, w, 0)                     # red, at the origin
+    assert away and right and base
+    assert max(r for r, _ in away) < min(r for r, _ in base), "+y is up-screen"
+    assert min(c for _, c in right) > max(c for _, c in base), "+x is right"
+    assert m.render(size=64, yaw=45, pitch=90) == m.render(size=64, yaw=0,
+                                                          pitch=90), \
+        "at the pole the camera must not roll with yaw"
+
+
+def test_render_only_needs_the_surface():
+    """Hollowing a model out must not change one pixel of its render.
+
+    The renderer skips faces with a filled neighbor, which is what keeps a
+    solid model from rasterizing its own interior; the skip is only sound if
+    those faces could never have shown.
+    """
+    ball = shapes.sphere((0, 0, 0), 9)
+    solid = Model()
+    solid.add(ball, "red")
+    shell = Model()
+    shell.add(ball, "red")
+    shell.keep(shell.surface())
+    assert len(shell) < len(solid)
+    assert shell.render(size=64) == solid.render(size=64)
+
+
+def test_render_hides_what_is_behind():
+    """The far voxel projects onto the same square and must not show."""
+    m = Model()
+    m.voxel((0, 0, 0), "red")
+    m.voxel((0, 5, 0), "blue")
+    w, _, rows = _decode_png(m.render(size=48, yaw=0, pitch=0))
+    lit = _pixels(rows, w)
+    assert lit
+    assert all(p[0] > p[2] for _, _, p in lit), "only the near red may show"
+
+
+def test_render_shades_faces_by_the_light():
+    """One cube from a corner shows three faces, brightest one on top."""
+    m = Model()
+    m.voxel((0, 0, 0), "white")
+    w, _, rows = _decode_png(m.render(size=48, yaw=30, pitch=30))
+    lit = _pixels(rows, w)
+    shades = {p for _, _, p in lit}
+    assert len(shades) == 3, f"want three face shades, got {sorted(shades)}"
+    rank = sorted(shades, key=sum)
+    top = [r for r, _, p in lit if p == rank[-1]]
+    dim = [r for r, _, p in lit if p == rank[0]]
+    assert sum(top) / len(top) < sum(dim) / len(dim), \
+        "the lit face is the one facing up"
+
+
+def test_render_darkens_the_crease_at_a_wall():
+    """Ambient occlusion: floor beside a step is darker than open floor."""
+    m = Model()
+    m.box((0, 0, 0), (4, 0, 0), "white")           # a strip of floor
+    m.voxel((4, 0, 1), "white")                    # one block standing on it
+    w, _, rows = _decode_png(m.render(size=64, yaw=0, pitch=90))
+    lit = _pixels(rows, w)
+    columns = {}                                   # screen column -> shades
+    for _, c, p in lit:
+        columns.setdefault(c, set()).add(p)
+    shades = sorted({p for _, _, p in lit}, key=sum)
+    assert len(shades) == 2, f"want lit and occluded floor, got {shades}"
+    dim = [c for c, ps in columns.items() if ps == {shades[0]}]
+    assert dim, "the occluded shade must own whole columns"
+    open_floor = min(c for c, ps in columns.items() if ps == {shades[-1]})
+    assert min(dim) > open_floor, "the dark strip sits beside the block"
+
+
+def test_render_paints_the_background_everywhere_else():
+    m = Model()
+    m.voxel((0, 0, 0), "red")
+    w, _, rows = _decode_png(m.render(size=32, background="black"))
+    corner = bytes(parse_color("black")[:3])
+    assert rows[0][:3] == corner and rows[-1][-3:] == corner
+
+
+def test_render_is_deterministic():
+    m = Model()
+    m.sphere((0, 0, 0), 5, "red")
+    assert m.render(size=48) == m.render(size=48)
+
+
+def test_render_cli_writes_one_png_per_view():
+    m = Model()
+    m.box((0, 0, 0), (4, 4, 4), "red")
+    src = _tmp()
+    m.save(src)
+    out = os.path.join(os.path.dirname(src), "shot.png")
+    assert _main(["voxel.py", "render", src, out, "--size", "32"]) == 0
+    _decode_png(open(out, "rb").read())
+
+    # An anchor with three different components, so a mis-ordered parse shows.
+    assert _main(["voxel.py", "render", src, out, "--size", "32",
+                  "--anchor", "1.5,2.5,3.5", "--scale", "4"]) == 0
+    assert open(out, "rb").read() == m.render(
+        size=32, yaw=30, pitch=25, anchor=(1.5, 2.5, 3.5), scale=4), \
+        "--anchor and --scale must reach render() as given"
+
+    assert _main(["voxel.py", "render", src, out, "--size", "32",
+                  "--view", "0,0", "--view", "-30,25.5"]) == 0
+    stem = out[:-len(".png")]
+    for suffix in ("_y0p0.png", "_y-30p25.5.png"):
+        _decode_png(open(stem + suffix, "rb").read())
 
 
 # -- scene (multi-model files) ---------------------------------------------

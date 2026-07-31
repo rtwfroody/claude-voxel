@@ -32,8 +32,10 @@ any size:
 from __future__ import annotations
 
 import math
+import os
 import struct
 import sys
+import zlib
 from collections import Counter
 
 MAX_DIM = 256  # per-axis limit imposed by the .vox format (coords are uint8)
@@ -1058,6 +1060,89 @@ def _unit(v):
     return (v[0] / n, v[1] / n, v[2] / n)
 
 
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+# --------------------------------------------------------------------------
+# png rendering -- see Model.render
+# --------------------------------------------------------------------------
+
+#: One entry per cube face: outward normal, the four corners of the face as
+#: offsets from the voxel's minimum corner (in traversal order, so the quad is
+#: not self-crossing), and the two tangent axes the ambient-occlusion probe
+#: steps along.
+_FACES = (
+    ((1, 0, 0), ((1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)),
+     ((0, 1, 0), (0, 0, 1))),
+    ((-1, 0, 0), ((0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)),
+     ((0, 1, 0), (0, 0, 1))),
+    ((0, 1, 0), ((0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)),
+     ((1, 0, 0), (0, 0, 1))),
+    ((0, -1, 0), ((0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)),
+     ((1, 0, 0), (0, 0, 1))),
+    ((0, 0, 1), ((0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)),
+     ((1, 0, 0), (0, 1, 0))),
+    ((0, 0, -1), ((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)),
+     ((1, 0, 0), (0, 1, 0))),
+)
+
+_AMBIENT = 0.35          # light a face gets with the lamp edge-on
+_AO_FACTOR = 0.92        # darkening per filled cell beside an exposed face
+_MIN_CANVAS = 32         # px, so an edge-on flat model is not a sliver
+
+
+def _write_png(width, height, rgb):
+    """Encode raw RGB bytes as a PNG. Filter 0 on every row, one IDAT."""
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    stride = width * 3
+    raw = bytearray()
+    for r in range(height):
+        raw.append(0)                       # filter type 0 (None)
+        raw += rgb[r * stride:(r + 1) * stride]
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR",
+                    struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+            + chunk(b"IEND", b""))
+
+
+def _fill_quad(fb, w, h, pts, pat):
+    """Scanline-fill a convex quad into a w x h RGB framebuffer.
+
+    `pts` are four (x, y) pixel-space points and `pat` is the 3-byte color.
+    A pixel is filled when its center lies inside the quad, which is what
+    makes two faces sharing an edge tile without a seam or an overdraw.
+    """
+    ys = (pts[0][1], pts[1][1], pts[2][1], pts[3][1])
+    r0 = max(0, math.ceil(min(ys) - 0.5))
+    r1 = min(h - 1, math.floor(max(ys) - 0.5))
+    for r in range(r0, r1 + 1):
+        yc = r + 0.5
+        lo = hi = None
+        xa, ya = pts[3]
+        for xb, yb in pts:
+            if (ya <= yc) != (yb <= yc):
+                xi = xa + (xb - xa) * (yc - ya) / (yb - ya)
+                if lo is None or xi < lo:
+                    lo = xi
+                if hi is None or xi > hi:
+                    hi = xi
+            xa, ya = xb, yb
+        if lo is None:
+            continue
+        c0 = max(0, math.ceil(lo - 0.5))
+        c1 = min(w - 1, math.floor(hi - 0.5))
+        if c1 >= c0:
+            p = (r * w + c0) * 3
+            fb[p:p + (c1 - c0 + 1) * 3] = pat * (c1 - c0 + 1)
+
+
 # --------------------------------------------------------------------------
 # model
 # --------------------------------------------------------------------------
@@ -1582,6 +1667,145 @@ class Model:
         out.append(self.stats() + f"   (1 cell = {step} voxel(s))")
         return "\n".join(out)
 
+    # -- render -------------------------------------------------------------
+
+    def render(self, path=None, *, size=512, yaw=30.0, pitch=25.0,
+               light=(-0.5, -0.8, 1.0), background="#e8e8e8", margin=0.04,
+               anchor=None, scale=None):
+        """Orthographic PNG render of the model, as bytes.
+
+        Also writes those bytes to `path` if one is given. `size` is the long
+        edge of the model's projected *bounding box*: the canvas crops to that
+        box rather than padding out to a square, leaving `margin` of `size` as
+        blank border on every edge (and never going below 32 px on an axis).
+        Background pixels cost as much to look at as the model does. An
+        organic silhouette that stays clear of the box corners lands somewhat
+        smaller than `size` -- fitting the box, not the drawn pixels, is what
+        keeps a multi-view sweep on one consistent framing.
+
+        `yaw` and `pitch` are in degrees. yaw=0 is the front view, the camera
+        looking along +Y exactly as in `preview()`; yaw=90 puts the camera on
+        the -X side. `pitch` is elevation above the horizon, so pitch=90 is
+        the top view (x right, +Y up), again matching `preview()`.
+
+        `anchor` is a world point -- floats are fine, and a voxel spans
+        `[p, p + 1]`, so its center is `p + 0.5` -- whose projection lands on
+        the exact center of the canvas. `scale` is pixels per world unit and
+        overrides `size` as the magnification (`size` then only sets the
+        border). Give two renders the same anchor and scale and the same
+        world point sits at the center of both at the same magnification, so
+        rounds of a build, or the frames of a turntable, can be laid over each
+        other and compared pixel for pixel even though their canvases differ
+        in size. Pick the anchor once at the first draft and keep it.
+
+        The whole model always stays on the canvas, so an anchor off to one
+        side just leaves more slack on that side.
+
+        `light` is a direction in world space, `background` anything
+        `parse_color` accepts. Palette alpha is ignored -- voxels render
+        opaque.
+        """
+        if not self.voxels:
+            raise ValueError("model is empty")
+
+        # -- camera. d is the direction the camera looks along, so a face is
+        # turned toward us when its normal opposes d, and depth grows with d.
+        yr, pr = math.radians(yaw), math.radians(pitch)
+        cp = math.cos(pr)
+        d = _unit((math.sin(yr) * cp, math.cos(yr) * cp, -math.sin(pr)))
+        # Straight up or down leaves d x world-up undefined; roll to +Y then.
+        up = (0.0, 1.0, 0.0) if abs(d[2]) > 0.9999 else (0.0, 0.0, 1.0)
+        right = _unit(_cross(d, up))
+        up_s = _cross(right, d)
+
+        # -- fit. A voxel occupies the unit cube [p, p + 1], so the box to
+        # frame runs one past the maximum corner on every axis.
+        lo, hi = self._extent()
+        us, vs = [], []
+        for cx in (lo[0], hi[0] + 1):
+            for cy in (lo[1], hi[1] + 1):
+                for cz in (lo[2], hi[2] + 1):
+                    us.append(cx * right[0] + cy * right[1] + cz * right[2])
+                    vs.append(cx * up_s[0] + cy * up_s[1] + cz * up_s[2])
+        u0, u1, v0, v1 = min(us), max(us), min(vs), max(vs)
+        s = (scale if scale is not None
+             else size * (1 - 2 * margin) / (max(u1 - u0, v1 - v0) or 1.0))
+        pad = round(size * margin)
+        if anchor is None:
+            cu, cv = (u0 + u1) / 2, (v0 + v1) / 2
+            w = max(_MIN_CANVAS, math.ceil((u1 - u0) * s) + 2 * pad)
+            h = max(_MIN_CANVAS, math.ceil((v1 - v0) * s) + 2 * pad)
+        else:
+            # Grow the canvas symmetrically about the anchor until the far
+            # side of the model is in frame: the anchor lands dead center, and
+            # the near side just gets more slack than it needs.
+            ax, ay, az = anchor
+            cu = ax * right[0] + ay * right[1] + az * right[2]
+            cv = ax * up_s[0] + ay * up_s[1] + az * up_s[2]
+            w = max(_MIN_CANVAS,
+                    2 * math.ceil(max(abs(u - cu) for u in us) * s + pad))
+            h = max(_MIN_CANVAS,
+                    2 * math.ceil(max(abs(v - cv) for v in vs) * s + pad))
+        ox = w / 2 - cu * s
+        oy = h / 2 + cv * s                      # rows run down, v runs up
+
+        rxs = (right[0] * s, right[1] * s, right[2] * s)
+        uxs = (up_s[0] * s, up_s[1] * s, up_s[2] * s)
+
+        # -- per-face constants, computed once for the six normals
+        lx, ly, lz = _unit(light)
+        faces = []
+        for normal, corners, tangents in _FACES:
+            nx, ny, nz = normal
+            if nx * d[0] + ny * d[1] + nz * d[2] >= -1e-9:
+                continue                      # turned away from the camera
+            offsets = tuple(
+                (cx * rxs[0] + cy * rxs[1] + cz * rxs[2],
+                 -(cx * uxs[0] + cy * uxs[1] + cz * uxs[2]))
+                for cx, cy, cz in corners)
+            bright = _AMBIENT + (1 - _AMBIENT) * max(
+                0.0, nx * lx + ny * ly + nz * lz)
+            probes = tuple((nx + tx * sign, ny + ty * sign, nz + tz * sign)
+                           for tx, ty, tz in tangents for sign in (1, -1))
+            faces.append((normal, offsets, probes, bright))
+
+        rgba = self.palette.rgba
+        pats = {}                             # (index, brightness) -> 3 bytes
+        bg = parse_color(background)
+        fb = bytearray(bytes(bg[:3]) * (w * h))
+
+        vox = self.voxels
+        dx, dy, dz = d
+        # Back to front: equal-size, non-overlapping cubes under an
+        # orthographic camera sort exactly, so nearer voxels simply overwrite.
+        for pos in sorted(vox, key=lambda p: p[0] * dx + p[1] * dy + p[2] * dz,
+                          reverse=True):
+            x, y, z = pos
+            idx = vox[pos]
+            bx = ox + x * rxs[0] + y * rxs[1] + z * rxs[2]
+            by = oy - (x * uxs[0] + y * uxs[1] + z * uxs[2])
+            for (nx, ny, nz), offsets, probes, bright in faces:
+                if (x + nx, y + ny, z + nz) in vox:
+                    continue                  # buried; only the skin is drawn
+                for px, py, pz in probes:
+                    if (x + px, y + py, z + pz) in vox:
+                        bright *= _AO_FACTOR
+                pat = pats.get((idx, bright))
+                if pat is None:
+                    r, g, b, _ = rgba(idx)
+                    pat = pats[(idx, bright)] = bytes((
+                        min(255, round(r * bright)),
+                        min(255, round(g * bright)),
+                        min(255, round(b * bright))))
+                quad = [(bx + du, by + dv) for du, dv in offsets]
+                _fill_quad(fb, w, h, quad, pat)
+
+        data = _write_png(w, h, fb)
+        if path is not None:
+            with open(path, "wb") as fh:
+                fh.write(data)
+        return data
+
     # -- construction from text --------------------------------------------
 
     @classmethod
@@ -1858,7 +2082,65 @@ def _read_dict(data, offset):
 # cli
 # --------------------------------------------------------------------------
 
+def _render_cli(argv):
+    """The `render` subcommand: one PNG, or one per repeated --view."""
+    src, out = argv[2], None
+    size, yaw, pitch, views = 512, 30.0, 25.0, []
+    anchor, scale = None, None
+    takes_value = ("--size", "--yaw", "--pitch", "--view", "--anchor",
+                   "--scale")
+    rest, i = argv[3:], 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg in takes_value:
+            if i + 1 >= len(rest):
+                print(f"{arg} needs a value")
+                return 2
+            val = rest[i + 1]
+            if arg == "--size":
+                size = int(val)
+            elif arg == "--yaw":
+                yaw = float(val)
+            elif arg == "--pitch":
+                pitch = float(val)
+            elif arg == "--scale":
+                scale = float(val)
+            elif arg == "--anchor":
+                parts = val.split(",")
+                if len(parts) != 3:
+                    print(f"--anchor wants X,Y,Z, not {val!r}")
+                    return 2
+                anchor = tuple(float(p) for p in parts)
+            else:
+                y, comma, p = val.partition(",")
+                if not comma:
+                    print(f"--view wants YAW,PITCH, not {val!r}")
+                    return 2
+                views.append((float(y), float(p)))
+            i += 2
+        elif arg.startswith("--"):
+            print(f"unknown option {arg}")
+            return 2
+        else:
+            out = arg
+            i += 1
+
+    m = Model.load(src)
+    if views:
+        stem = os.path.splitext(out or src)[0]
+        paths = [f"{stem}_y{vy:g}p{vp:g}.png" for vy, vp in views]
+    else:
+        views = [(yaw, pitch)]
+        paths = [out or os.path.splitext(src)[0] + ".png"]
+    for (vy, vp), path in zip(views, paths):
+        m.render(path, size=size, yaw=vy, pitch=vp, anchor=anchor, scale=scale)
+        print(path)
+    return 0
+
+
 def _main(argv):
+    if len(argv) >= 3 and argv[1] == "render":
+        return _render_cli(argv)
     if len(argv) >= 3 and argv[1] in ("preview", "info", "check"):
         m = Model.load(argv[2])
         if argv[1] == "info":
@@ -1883,7 +2165,10 @@ def _main(argv):
     print(__doc__)
     print("usage: voxel.py preview <file.vox> [--ansi]\n"
           "       voxel.py info <file.vox>\n"
-          "       voxel.py check <file.vox>   # find floating parts")
+          "       voxel.py check <file.vox>   # find floating parts\n"
+          "       voxel.py render <file.vox> [out.png] [--size N]\n"
+          "                  [--yaw D] [--pitch D] [--view YAW,PITCH ...]\n"
+          "                  [--anchor X,Y,Z] [--scale S]")
     return 0
 
 

@@ -63,6 +63,14 @@ Model()                       .voxel(pos,c) .box(a,b,c) .sphere(ctr,r,c)
                               .radial_profile(ctr,dir,normal,r_lo,r_hi)
   io                          .save(path) Model.load(path) Model.from_layers(...)
                               .preview(max_dim=48, ansi=False, views=(...))
+                              .render(path=None, size=512, yaw=30, pitch=25,
+                                      light=, background=, margin=,
+                                      anchor=None, scale=None)
+                              -- orthographic PNG bytes; yaw=0 is preview's
+                              front, pitch=90 its top; size is the long edge
+                              of the content, anchor= centers a world point
+                              and scale= fixes px/voxel, so two renders can
+                              be overlaid
 
 Scene()                       .place(model,offset) .voxel(pos,c) .add(coords,c)
   CHUNK=256                   len() .bounds .size .chunk_stats() .save(path)
