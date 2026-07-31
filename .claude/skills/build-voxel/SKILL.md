@@ -1,6 +1,7 @@
 ---
 name: build-voxel
-description: Step-by-step workflow for creating a voxel object or a multi-object scene as a .vox file, with or without photo references. Use whenever asked to make, build, or improve a voxel model, object, asset, or scene in this project.
+description: Step-by-step workflow for creating a voxel object or a multi-object scene as a .vox file, with or without photo references. Use whenever asked to make, build, or improve a voxel model, object, asset, or scene in this project. Accepts an optional leading quality tier (draft | standard | fine | ultra).
+argument-hint: "[draft|standard|fine|ultra] <what to build>"
 ---
 
 # Building voxel objects and scenes
@@ -37,6 +38,31 @@ record of what was actually asked for across the whole build. A multi-module
 build puts this in the entry point (`build.py`) only; the other modules just
 say what they contain.
 
+## Quality tiers
+
+The first word of the arguments may be a quality tier: `draft`, `standard`,
+`fine`, or `ultra`. Default is **standard**. If the prompt's own wording
+implies a tier ("quick and rough" → draft; "polish it", "photoreal" → fine or
+ultra), use that, and say in the reply which tier was picked and why.
+
+The tier scales **visual** effort only. Everything engineering-grade is
+unconditional at every tier: seeded randomness, named constants, the geometric
+suite (Part 1 step 4), support counts, and the prompt-recording docstring.
+Draft means fewer renders, not sloppier construction.
+
+| | draft | standard | fine | ultra |
+| --- | --- | --- | --- | --- |
+| style (step 0) | pick one, record it | ask | ask + `spec.md` | ask + `spec.md` |
+| color source | recalled, chroma-disciplined (Part 3) | recalled (Part 3) | measured from photos (Part 2) | measured from photos (Part 2) |
+| vision loop (step 5) | none — ASCII previews only | 1 round, 4 views | ≤3 rounds, 5 views | ≤3 rounds, all 17 views |
+| harvest pass | skip | skip | run | run |
+
+`render_vox.sh` always writes 16 turntable frames plus an isometric — its
+camera flags are ignored (see the script header) — so the tier governs how
+many of those files the critic **reads**, never how many exist. 4 views =
+frames 00/04/08/12; 5 views = those plus `_iso`; ultra reads all 17. Blind
+identification (step 5.2) applies at every tier that renders.
+
 ## Step 0 — agree the visual style before building anything
 
 **There is no house style.** The models in this repo do not share one, and
@@ -46,8 +72,9 @@ named constants, seeded randomness), not for how a model should look.
 
 So the first action of a build, before any spec, palette or geometry, is to
 **ask the user which style to work in** — one `AskUserQuestion` with a short
-menu. Always include "match an existing `.vox`" as one of the options. A
-reasonable menu:
+menu. (At the draft tier, skip the question: pick the style that fits the
+subject and state the choice instead.) Always include "match an existing
+`.vox`" as one of the options. A reasonable menu:
 
 - **Match an existing model** — the user names a `.vox` (or a directory in
   `playground/`); measure it and match. Procedure below.
@@ -192,6 +219,11 @@ seated, `test_voxel.py` if `voxel.py` changed. Plus, from later builds:
 
 ### 5. Vision loop (the step that makes it *look right*)
 
+Skipped at the draft tier — the ASCII proofread of step 2 and the previews of
+step 4 are draft's whole visual check. Rounds and view counts per tier are in
+the quality-tier table; standard stops after one round unless blind
+identification fails.
+
 In a subagent, up to ~3 rounds:
 
 1. Render: `devscripts/render_vox.sh <vox> <outdir> 512` — 16-frame turntable
@@ -214,7 +246,8 @@ In a subagent, up to ~3 rounds:
 
 ## Part 2 — with photo references
 
-Adds two things to Part 1: measured color, and ground truth for the critic.
+Fine and ultra tiers (or any tier where the user supplies photos). Adds two
+things to Part 1: measured color, and ground truth for the critic.
 
 1. **Fetch**: Wikimedia Commons API works well
    (`action=query&generator=search&gsrnamespace=6&prop=imageinfo&iiprop=url&iiurlwidth=1280`).
@@ -279,8 +312,8 @@ Adds two things to Part 1: measured color, and ground truth for the critic.
 
 ## Part 3 — without photo references
 
-Substitute written knowledge for photos, and be strict about the two places
-unreferenced builds go wrong:
+The color path for draft and standard tiers. Substitute written knowledge for
+photos, and be strict about the two places unreferenced builds go wrong:
 
 1. **Write the spec first**: 5–10 named features with rough ratios (e.g.
    "bill ≈ 1/3 of total length, head well aft, tail low") — verbal anatomy
@@ -337,6 +370,9 @@ unreferenced builds go wrong:
 
 ## Last step — harvest anything reusable into `voxel.py`
 
+Fine and ultra tiers only — draft and standard builds end without this pass
+(mention that it was skipped so the user can ask for it).
+
 Once the model is finished, read back through the Python you wrote for it and
 ask of each helper: **would this be useful on a model of a different subject in
 a different style?** A build that needed a helper usually needed it because the
@@ -373,10 +409,16 @@ saves. Either way, say in the final report what you promoted or why you didn't.
 
 ## Done means
 
-Geometric suite green **and** a final-round render critique with nothing but
-nitpicks **and** (if references exist) colors within measured tolerance **and**
-the style table from step 0 checked off against the finished model — a build
-that drifted off its agreed palette ceiling or detail density is not done, and
-the drift is only visible if the numbers were written down first. Plus the
-build script's docstring carrying the prompt and every follow-up, and the
-reusable-helper pass above run to a decision.
+At every tier: geometric suite green, and the build script's docstring
+carrying the prompt and every follow-up. On top of that, by tier:
+
+- **draft** — the 2D proofread (step 2) done and the step-4 previews read as
+  the subject.
+- **standard** — the single render round confirms blind identification and
+  produced nothing worse than nitpicks.
+- **fine / ultra** — a final-round render critique with nothing but nitpicks
+  **and** colors within measured tolerance **and** the style table from step 0
+  checked off against the finished model — a build that drifted off its agreed
+  palette ceiling or detail density is not done, and the drift is only visible
+  if the numbers were written down first — **and** the reusable-helper pass
+  above run to a decision.
