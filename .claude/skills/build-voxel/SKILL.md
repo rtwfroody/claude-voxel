@@ -54,14 +54,31 @@ Draft means fewer renders, not sloppier construction.
 | --- | --- | --- | --- | --- |
 | style (step 0) | pick one, record it | ask | ask + `spec.md` | ask + `spec.md` |
 | color source | recalled, chroma-disciplined (Part 3) | recalled (Part 3) | measured from photos (Part 2) | measured from photos (Part 2) |
-| vision loop (step 5) | none — ASCII previews only | 1 round, 4 views | ≤3 rounds, 5 views | ≤3 rounds, all 17 views |
+| vision loop (step 5) | none — ASCII previews only | 1 round, spine only | ≤3 rounds, spine + subject views | ≤3 rounds, spine + subject + sweep |
 | harvest pass | skip | skip | run | run |
 
-`render_vox.sh` always writes 16 turntable frames plus an isometric — its
-camera flags are ignored (see the script header) — so the tier governs how
-many of those files the critic **reads**, never how many exist. 4 views =
-frames 00/04/08/12; 5 views = those plus `_iso`; ultra reads all 17. Blind
-identification (step 5.2) applies at every tier that renders.
+Rendering is `m.render()` / `python3 voxel.py render` — in-repo, stdlib, no
+external tools — so each round renders exactly the views it needs. Views come
+in three kinds:
+
+- **The spine** — fixed, identical for every build: two blind-ID heroes,
+  `--view 35,25 --view 215,25`, plus the canonical orthographics
+  `--view 0,0 --view 90,0 --view 0,90`, which match `preview()` and the
+  silhouette-mask conventions exactly (lay them straight over the masks).
+  The spine is fixed *so that blind identification cannot be aimed*: if the
+  build picks every camera, "what is this?" quietly becomes "identify this
+  from its best angle".
+- **Subject views** — chosen in step 0's spec, one per defining feature: a
+  low side view for a bill profile, a top view for lettering, a **negative
+  pitch for anything with an underside or overhang** — undersides are a
+  standing bug class here and now have a camera that can see them.
+- **Confirmation views** — chosen per fix in step 5.5, aimed at the patched
+  region and usually cropped to it.
+
+Ultra adds a completeness sweep: an 8-frame turntable (`--view y,25` for y in
+0,45,…,315) plus one underside (`--view 35,-30`). Blind identification
+(step 5.2) applies at every tier that renders, and always sees the spine
+heroes of the **whole** model — never a builder-chosen or cropped view.
 
 ## Step 0 — agree the visual style before building anything
 
@@ -117,7 +134,8 @@ Take the chroma (`max(rgb) - min(rgb)`) and luma distribution over the
 histogram *weighted by voxel count* — an unweighted palette read overstates
 accent colors that occupy twenty voxels. Note voxels-per-feature on something
 identifiable, whether shading exists at all, and how many colors a single
-material uses. Render it (step 5's script) and look at it. Then write those
+material uses. Render it (`Model.load(path).render(...)`, step 5) and look at
+it. Then write those
 numbers into `spec.md` as the target, and check the new model against them at
 the end.
 
@@ -226,21 +244,33 @@ identification fails.
 
 In a subagent, up to ~3 rounds:
 
-1. Render: `devscripts/render_vox.sh <vox> <outdir> 512` — 16-frame turntable
-   + isometric. Needs `vengi-thumbnailer` on PATH (or `THUMB=/path/to/it`);
-   the script says so and exits 1 if it is missing. The thumbnailer's
-   `-a/-d/--sunelevation` flags are silently ignored; the script md5-checks
-   that frames differ — heed its warning. ASan stderr noise is not failure.
+1. Render the round's views (the tier table says which):
+   `python3 voxel.py render <vox> --view YAW,PITCH ...`, or `m.render()` from
+   the build script. **On the first rendering round, pin the camera**: pick an
+   anchor (the model's center at first draft — a world point; a voxel's
+   center is `p + 0.5`) and a scale (px per voxel; whatever puts the long
+   edge near 512), record both as named constants in the build script, and
+   pass them to every render for the rest of the build. Same anchor + same
+   scale = every round's images center-aligned and pixel-comparable, even as
+   the bounds shift under fixes. Size rules: 512 default, 768 the hard
+   ceiling — a model is 100–250 voxels across, so anything past that pays
+   vision tokens for no information.
 2. **Blind identification first**: before comparing against anything, ask
-   "what is this?" of the renders (a fresh subagent is ideal). If the answer
-   isn't the subject, that gap is the round's priority.
+   "what is this?" of the spine heroes (a fresh subagent is ideal). If the
+   answer isn't the subject, that gap is the round's priority.
 3. Critique the 2–4 biggest failures in priority order: proportion → pose →
    silhouette → color placement → surface detail. Cite model coordinates.
 4. Patch, classifying each fix: mask/geometry edit vs post-pass
    (carve/repaint). Re-run the geometric suite after every patch — the two
    check families guard each other.
-5. Re-render and confirm each fix visibly landed. Stop when a round produces
-   only nitpicks.
+5. Re-render and confirm each fix visibly landed, with a view **aimed at the
+   patched region** (name the yaw/pitch that shows it when writing the fix).
+   If the feature sits below ~4 px/voxel in the full render, zoom by
+   rendering the region, not by enlarging the canvas:
+   `m.copy().keep(region).render(...)` — a before/after pair of region
+   renders shares its own anchor/scale. Region renders are for confirmation
+   only, never identification; the critic judging "what is this" always sees
+   the whole model. Stop when a round produces only nitpicks.
 
 ---
 
