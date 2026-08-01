@@ -31,6 +31,7 @@ any size:
 
 from __future__ import annotations
 
+import bisect
 import math
 import os
 import struct
@@ -335,6 +336,72 @@ def weighted_quantiles(weights, fractions):
     return cuts
 
 
+def share_fractions(shares):
+    """The cumulative `fractions` that give each bucket its share.
+
+    `weighted_quantiles` takes **cumulative boundaries** -- one fewer than the
+    number of buckets -- and a list of per-bucket shares looks exactly like
+    them at the call site. A 20/60/20 three-tone split is `[0.20, 0.80]`, not
+    `[0.20, 0.60, 0.20]`; the latter asks for *four* buckets cut at
+    p20/p60/p80 and is wrong in a way nothing downstream complains about. A
+    curtain measured at 34% dark / 58% mid / 8% glint was cut at p34/p58 and
+    painted 34/24/42 instead: three rounds of blind identification called the
+    result stone, because 42% of it had gone to the pale glint tone. Convert
+    the measured shares and hand the result on:
+
+        cuts = weighted_quantiles(field, share_fractions([0.20, 0.60, 0.20]))
+
+    `shares` need not sum to 1 -- they are normalized, so raw area
+    percentages, pixel counts or relative weights all work.
+    """
+    shares = list(shares)
+    total = float(sum(shares))
+    if not shares or total <= 0:
+        raise ValueError("shares are empty or sum to zero")
+    out, acc = [], 0.0
+    for w in shares[:-1]:
+        acc += w / total
+        out.append(acc)
+    return out
+
+
+def rank_normalize(values):
+    """Replace every value by its rank in the sample, spread over [0, 1].
+
+    Takes `{key: value}` and returns `{key: rank}`; any other iterable returns
+    a list of ranks in the same order. The smallest value maps to 0.0 and the
+    largest to 1.0, so `lo + (hi - lo) * rank` really does span `lo..hi`.
+
+    This is what to reach for when a **continuous** quantity is driven by
+    `fbm3` -- a heightfield, a depth, a tint strength. fbm3 piles up in the
+    middle (p20 0.40, p50 0.52, p80 0.62), so `base + amp * fbm3(...)` only
+    ever spends the middle fifth of `base..base + amp`: a bank meant to clump
+    and dip came out a ridge of near-constant height, and three separate
+    viewers called it a wall. Ranking the field first spends all of the range.
+    Use `weighted_quantiles` instead when the output is a handful of buckets
+    rather than a continuum -- the two answer different questions.
+
+    Sample the field over the coordinates you are actually going to paint, not
+    over some larger region, or the ranks describe a distribution you never
+    show:
+
+        field = {p: fbm3(p[0] * s, p[1] * s, p[2] * s, seed) for p in coords}
+        for p, r in rank_normalize(field).items():
+            m.voxel(p, ramp_at(RAMP, r))
+
+    Ties all take the rank of the bottom of their group, so a constant field
+    comes back all zeros rather than all 0.5.
+    """
+    items = list(values.items()) if hasattr(values, "items") else None
+    seq = [v for _, v in items] if items is not None else list(values)
+    order = sorted(seq)
+    n = max(1, len(order) - 1)
+    ranks = [bisect.bisect_left(order, v) / n for v in seq]
+    if items is None:
+        return ranks
+    return {k: r for (k, _), r in zip(items, ranks)}
+
+
 def match_histogram(weights, ramp, distribution=None, key=None):
     """Give every source value the ramp color at its own cumulative rank.
 
@@ -481,6 +548,11 @@ def fbm3(x, y, z, seed=0, octaves=4, lacunarity=2.0, gain=0.5):
 
         vals = [fbm3(x * s, y * s, z * s, seed) for x, y, z in coords]
         cuts = weighted_quantiles({v: 1 for v in vals}, [0.25, 0.75])
+
+    That is the answer for buckets. When the field drives a *continuous*
+    quantity instead -- a height, a depth, a tint strength -- `rank_normalize`
+    is the same discipline in the other shape: it flattens the sample onto
+    [0, 1] so `base + amp * rank` spends the whole range.
     """
     total, amp, norm, f = 0.0, 1.0, 0.0, 1.0
     for o in range(octaves):

@@ -85,8 +85,13 @@ color                         parse_color to_hex luma chroma
                               relight(c,k)      +one offset; chroma held fixed
                               ramp_at(ramp,t) disc_average(ramp)
                               weighted_quantiles(weights,fractions)
+                              share_fractions(shares)  per-bucket shares -> the
+                              cumulative `fractions` above; they are not the same
                               match_histogram(weights,ramp,distribution)
 noise                         noise3(x,y,z,seed) fbm3(x,y,z,seed,octaves=4)
+                              rank_normalize(values)  {key:v}->{key:rank} (or a
+                              sequence); flattens a field onto [0,1] so
+                              base+amp*rank spends the whole range
 ```
 
 `rock` is the only shape that is not smooth — a triaxial ellipsoid chewed up by
@@ -201,7 +206,18 @@ cells = {(x,z) for (x,y,z),i in m.voxels.items() if m.palette.rgba(i)==target}
   20%. Thresholds picked by intuition hand most of the surface to the outer
   buckets; one body ended up with its base color on 17% of its front face.
   Sample the field over the coordinates you will actually paint and take
-  `weighted_quantiles` of that. Two separate builds hit this.
+  `weighted_quantiles` of that. Three separate builds hit this. When the field
+  drives a *continuous* quantity rather than buckets — a height, a depth, a
+  tint strength — `rank_normalize` is the same fix in the other shape:
+  `base + amp * fbm3(...)` only ever spends the middle fifth of its range, and
+  a bank meant to clump and dip came out a flat ridge that three viewers called
+  a wall.
+- **`weighted_quantiles` takes cumulative boundaries, not per-bucket shares.**
+  A 20/60/20 split is `[0.20, 0.80]`. Passing the shares asks for four buckets
+  cut at p20/p60/p80 and nothing downstream complains: a curtain measured
+  34/58/8 painted 34/24/42 and read as stone for three rounds of blind ID.
+  Convert with `share_fractions([0.20, 0.60, 0.20])` and keep the measured
+  shares in the constant, where they can be checked against the measurement.
 - **Mirror seam.** `m.mirror("x", at=0)` reflects across `x=0`, and column 0 is
   its own mirror image. Parts crossing the centreline must start *at* `x=0`;
   starting at `x=1` leaves a one-voxel gap down the middle.

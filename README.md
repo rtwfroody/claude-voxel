@@ -208,7 +208,22 @@ boundaries: a quantised source holds only a handful of distinct values, and a
 cut placed at the exact requested fraction lands *inside* a tied group of
 them, which either dithers or silently empties the bucket above it.
 
-Feed both of them weights that reflect real area. Cell counts are only area
+Its `fractions` are **cumulative boundaries** — one fewer than the number of
+buckets — and per-bucket shares look exactly like them at the call site. Keep
+the measured shares in the constant, where they can be checked against the
+measurement, and convert:
+
+```python
+cuts = weighted_quantiles(field, share_fractions([0.20, 0.60, 0.20]))
+```
+
+Handing it `[0.20, 0.60, 0.20]` directly asks for a *fourth* bucket cut at
+p20/p60/p80, and nothing downstream complains: a foliage curtain measured
+34% dark / 58% mid / 8% glint painted 34/24/42 that way, and the 42% of it
+wearing the pale glint tone read as stone through three rounds of blind
+identification.
+
+Feed all of them weights that reflect real area. Cell counts are only area
 when the cells are equal-area — an equirectangular map's rows are not.
 
 ## Noise
@@ -228,6 +243,22 @@ you are actually going to paint and take its quantiles:
 vals = [fbm3(x * s, y * s, z * s, seed) for x, y, z in coords]
 cuts = weighted_quantiles({v: 1 for v in vals}, [0.25, 0.75])
 ```
+
+That is the answer when the field picks between a handful of colors. When it
+drives a **continuous** quantity instead — a height, a depth, a tint strength
+— `rank_normalize` is the same discipline in the other shape. It replaces
+every value by its rank in the sample, so the smallest lands at 0.0 and the
+largest at 1.0 and `base + amp * rank` really spans `base..base + amp`:
+
+```python
+field = {x: fbm3(x * s, 0, 0, seed) for x in range(x0, x1 + 1)}
+height = {x: round(3 + 11 * r) for x, r in rank_normalize(field).items()}
+```
+
+Written the obvious way, `3 + 11 * fbm3(...)` spends only the middle fifth of
+3..14, and the bank it was drawing came out a ridge of near-constant height
+that three separate viewers called a wall. It takes a dict or any sequence,
+and returns the matching shape.
 
 ## Silhouettes
 

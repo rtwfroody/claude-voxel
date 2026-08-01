@@ -9,9 +9,9 @@ import zlib
 
 from voxel import (MAX_DIM, Model, Palette, Scene, bounds, chroma, components,
                    disc_average, fbm3, luma, match_histogram, mirror, noise3,
-                   parse_color, ramp_at, relight, rotate90, scale, scale_color,
-                   shapes, to_hex, translate, weighted_quantiles, _main,
-                   _walk_chunks)
+                   parse_color, ramp_at, rank_normalize, relight, rotate90,
+                   scale, scale_color, shapes, share_fractions, to_hex,
+                   translate, weighted_quantiles, _main, _walk_chunks)
 
 
 def _tmp(name="t.vox"):
@@ -1180,6 +1180,91 @@ def test_weighted_quantiles_raises_rather_than_emptying_a_bucket():
     except ValueError:
         return
     raise AssertionError("3 cuts out of 2 values must raise, not lose a color")
+
+
+def test_share_fractions_converts_shares_to_boundaries():
+    assert share_fractions([0.20, 0.60, 0.20]) == [0.20, 0.80]
+    assert share_fractions([1.0]) == []
+    # Unnormalized: raw area percentages and plain counts give the same cuts.
+    assert share_fractions([25.0, 25.0, 50.0]) == [0.25, 0.50]
+    assert share_fractions([1, 1, 2]) == [0.25, 0.50]
+    for bad in ([], [0.0, 0.0]):
+        try:
+            share_fractions(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"share_fractions({bad}) must raise")
+
+
+def test_share_fractions_fixes_shares_passed_as_boundaries():
+    """The bug this exists for: per-bucket shares handed straight to
+    `weighted_quantiles`, which wants cumulative boundaries.
+
+    A 34/58/8 split passed raw asks for four buckets cut at p34/p58, painting
+    34/24/42 -- the last bucket, meant to be an 8% glint, takes 42% of the
+    surface and the whole thing reads as a different material.
+    """
+    field = {i: fbm3(i * 0.11, i * 0.03, 0.0, 5) for i in range(600)}
+    shares = [0.34, 0.58, 0.08]
+
+    def achieved(fractions, n_buckets):
+        cuts = weighted_quantiles({v: 1 for v in field.values()}, fractions)
+        counts = [0] * n_buckets
+        for v in field.values():
+            counts[min(len(cuts), sum(1 for c in cuts if v > c))] += 1
+        return [c / len(field) for c in counts]
+
+    raw = achieved(shares, 4)
+    assert raw[2] < 0.30 and raw[3] > 0.30      # the glint bucket runs away
+    got = achieved(share_fractions(shares), 3)
+    assert all(abs(g - w) < 0.02 for g, w in zip(got, shares))
+
+
+def test_rank_normalize_spreads_a_field_over_the_full_range():
+    """The bug this exists for: fbm3 only spends the middle of a range."""
+    raw = [fbm3(x * 0.055, 0.0, 0.0, 3307, octaves=3) for x in range(200)]
+    assert max(raw) - min(raw) < 0.55           # nowhere near the full [0, 1]
+
+    ranks = rank_normalize(raw)
+    assert isinstance(ranks, list) and len(ranks) == len(raw)
+    assert min(ranks) == 0.0 and max(ranks) == 1.0
+    assert [r for _, r in sorted(zip(raw, ranks))] == sorted(ranks)
+
+    # base + amp * value, the heightfield idiom, over 3..14.
+    heights = [round(3 + 11 * r) for r in ranks]
+    assert min(heights) == 3 and max(heights) == 14
+    unranked = [round(3 + 11 * v) for v in raw]
+    assert max(unranked) - min(unranked) < 6    # a ridge, not clumps
+
+
+def test_rank_normalize_is_uniform_where_fbm3_is_not():
+    coords = [(x, y, 0) for x in range(40) for y in range(40)]
+    raw = [fbm3(x * 0.09, y * 0.09, 0.0, 11) for x, y, _ in coords]
+    ranks = rank_normalize(dict(zip(coords, raw)))
+    assert set(ranks) == set(coords)
+
+    def decile_counts(vals):
+        c = [0] * 10
+        for v in vals:
+            c[min(9, int(v * 10))] += 1
+        return c
+
+    flat = decile_counts(ranks.values())
+    lumpy = decile_counts(raw)
+    n = len(coords) / 10.0
+    assert all(abs(c - n) <= 0.01 * len(coords) for c in flat)
+    # fbm3 piles up in the middle and never reaches either end.
+    assert max(lumpy) > 2.5 * n and lumpy[0] == 0 and lumpy[9] == 0
+
+
+def test_rank_normalize_ties_and_edges():
+    assert rank_normalize({}) == {}
+    assert rank_normalize([]) == []
+    assert rank_normalize([7.0]) == [0.0]
+    # A tied group takes the rank of its bottom: a constant field is all zeros.
+    assert rank_normalize([2.0, 2.0, 2.0]) == [0.0, 0.0, 0.0]
+    # ... and a tie at the top therefore never reaches 1.0.
+    assert rank_normalize([5.0, 1.0, 5.0, 3.0]) == [2 / 3, 0.0, 2 / 3, 1 / 3]
 
 
 def test_match_histogram_reproduces_a_known_distribution():
