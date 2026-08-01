@@ -7,11 +7,13 @@ import sys
 import tempfile
 import zlib
 
-from voxel import (MAX_DIM, Model, Palette, Scene, bounds, chroma, components,
-                   disc_average, fbm3, luma, match_histogram, mirror, noise3,
-                   parse_color, ramp_at, rank_normalize, relight, rotate90,
-                   scale, scale_color, shapes, share_fractions, to_hex,
-                   translate, weighted_quantiles, _main, _walk_chunks)
+from voxel import (MAX_DIM, Model, Palette, Scene, bounds, bucket_by_cuts,
+                   bucket_by_shares, chroma, components, disc_average,
+                   distance_field, fbm3, interp, luma, match_histogram, mirror,
+                   noise3, parse_color, ramp_at, rank_normalize, relight,
+                   rotate90, scale, scale_color, shapes, share_fractions,
+                   smoothstep, to_hex, translate, weighted_quantiles, _main,
+                   _walk_chunks)
 
 
 def _tmp(name="t.vox"):
@@ -1528,6 +1530,162 @@ def test_radial_profile_takes_the_nearest_hit_not_the_far_edge():
                            search=6)
     assert [c for _, c in got] == ["red", "red", "red"], \
         "probing outward from the plane keeps the lid out of the answer"
+
+
+# -- curves ----------------------------------------------------------------
+
+def test_interp_reads_a_measured_profile():
+    knots = ((-75, -100.0), (-45, -95.0), (0, -62.0))
+    assert interp(knots, -75) == -100.0                 # first knot exactly
+    assert interp(knots, 0) == -62.0                    # last knot exactly
+    assert interp(knots, -60) == -97.5                  # halfway along a leg
+    assert interp(knots, -22.5) == -78.5
+
+
+def test_interp_clamps_rather_than_extrapolating():
+    """A profile table that stops is a shape that stops."""
+    knots = ((0, 10.0), (10, 20.0))
+    assert interp(knots, -50) == 10.0
+    assert interp(knots, 500) == 20.0
+    # Extrapolating the last leg would give 60 and 1010 respectively.
+    assert interp(knots, -50) != 10.0 - 50.0
+
+
+def test_interp_does_not_round():
+    """Head of a chain: keep the float, round where it is painted."""
+    knots = ((0, 0.0), (3, 1.0))
+    assert interp(knots, 1) == 1.0 / 3.0
+    assert 182.0 < interp(((0, 180.0), (10, 185.0)), 5) < 183.0
+
+
+def test_smoothstep_clamps_outside_zero_one():
+    """The clamp is the reason it is worth naming.
+
+    The argument is nearly always a distance over a run length, so it goes
+    negative on one side and past 1 on the other. The bare cubic turns back
+    around out there -- at t = 1.5 it is 0, at t = 2 it is -4.
+    """
+    assert smoothstep(-3.0) == 0.0
+    assert smoothstep(0.0) == 0.0
+    assert smoothstep(0.5) == 0.5
+    assert smoothstep(1.0) == 1.0
+    assert smoothstep(7.0) == 1.0
+    bare = lambda t: t * t * (3.0 - 2.0 * t)
+    assert bare(1.5) == 0.0 and bare(2.0) == -4.0       # what it saves you from
+
+
+def test_smoothstep_arrives_flat_at_both_ends():
+    """The reason to prefer it to a linear ramp: no crease where they meet."""
+    assert smoothstep(0.02) < 0.02 / 10
+    assert 1.0 - smoothstep(0.98) < 0.02 / 10
+    vals = [smoothstep(i / 40.0) for i in range(41)]
+    assert vals == sorted(vals)
+    for a, b in zip(vals, reversed(vals)):
+        assert abs(a + b - 1.0) < 1e-12                 # symmetric about 0.5
+
+
+# -- bucketing a field by measured area shares -------------------------------
+
+def test_bucket_by_cuts_uses_inclusive_upper_bounds():
+    """weighted_quantiles' convention, so its output drops straight in."""
+    items = "abcde"
+    values = [1.0, 2.0, 3.0, 4.0, 5.0]
+    groups = bucket_by_cuts(items, values, [2.0, 4.0])
+    assert groups == [{"a", "b"}, {"c", "d"}, {"e"}]
+    assert bucket_by_cuts(items, values, []) == [set(items)]
+
+
+def test_bucket_by_shares_hits_the_measured_shares_on_a_noise_field():
+    """End of the chain, which is the only place this can be checked.
+
+    fbm3 piles up in the middle, so thresholds that look like the shares
+    select nothing like them -- that naive version is measured here too, since
+    a check that only runs against the fixed code proves nothing.
+    """
+    cells = [(x, y) for x in range(60) for y in range(60)]
+    vals = [fbm3(x * 0.07, y * 0.07, 0.0, 91) for x, y in cells]
+    shares = [0.20, 0.60, 0.20]
+
+    got = [len(g) / len(cells)
+           for g in bucket_by_shares(cells, vals, shares)]
+    assert len(got) == 3
+    for want, have in zip(shares, got):
+        assert abs(have - want) < 0.03, got
+
+    naive = [len(g) / len(cells)
+             for g in bucket_by_cuts(cells, vals, [0.20, 0.80])]
+    assert naive[0] < 0.02 and naive[1] > 0.95, naive
+
+
+def test_bucket_by_shares_splits_a_quantised_field_by_area():
+    """Ties are weighted by how many items carry them, not one vote each.
+
+    An imported map holds a handful of distinct levels covering wildly
+    different areas. Counting distinct levels instead puts the cut in the
+    wrong place: here it would hand 90% of the picture to the first bucket.
+    """
+    items = list(range(100))
+    values = [0] * 70 + [1] * 10 + [2] * 10 + [3] * 10
+    groups = bucket_by_shares(items, values, [0.70, 0.30])
+    assert [len(g) for g in groups] == [70, 30]
+
+    by_distinct = weighted_quantiles({v: 1 for v in values}, [0.70])
+    assert [len(g) for g in bucket_by_cuts(items, values, by_distinct)] \
+        == [90, 10]
+
+
+def test_bucket_by_shares_returns_paintable_sets():
+    ramp = ("#101010", "#808080", "#f0f0f0")
+    cells = [(x, 0, 0) for x in range(300)]
+    vals = [fbm3(x * 0.05, 0.0, 0.0, 7) for x, _, _ in cells]
+    m = Model()
+    for color, group in zip(ramp, bucket_by_shares(cells, vals,
+                                                   [0.25, 0.50, 0.25])):
+        m.add(group, color)
+    assert len(m) == len(cells)
+    assert len(m.palette) == 3
+
+
+# -- distance field ----------------------------------------------------------
+
+def test_distance_field_counts_steps_from_the_seeds():
+    domain = {(x, 0) for x in range(1, 6)}
+    dist = distance_field({(0, 0)}, domain)
+    assert dist == {(1, 0): 1, (2, 0): 2, (3, 0): 3, (4, 0): 4, (5, 0): 5}
+    assert (0, 0) not in dist                   # seeds are not in the result
+
+
+def test_distance_field_goes_the_long_way_round_an_obstacle():
+    """Steps through the domain, not straight-line distance.
+
+    A wall between a column and the water means that column is far from the
+    water, however close it looks on a map.
+    """
+    cells = {(x, y) for x in range(7) for y in range(7)}
+    wall = {(3, y) for y in range(6)}           # gap only at y = 6
+    seeds = {(0, 0)}
+    dist = distance_field(seeds, cells - wall - seeds)
+    assert dist[(2, 0)] == 2                    # near side, straight across
+    assert dist[(4, 0)] == 16                   # 6 up, 4 across, 6 back down
+    assert not any(c in dist for c in wall)
+
+
+def test_distance_field_leaves_unreachable_cells_out():
+    island = {(20, 20), (21, 20)}
+    domain = {(x, 0) for x in range(1, 4)} | island
+    dist = distance_field({(0, 0)}, domain)
+    assert set(dist) == {(1, 0), (2, 0), (3, 0)}
+    assert dist.get((20, 20), 99) == 99         # read it with a default
+
+
+def test_distance_field_works_in_three_dimensions():
+    solid = shapes.box((0, 0, 0), (6, 6, 6))
+    skin = {c for c in solid
+            if 0 in c or 6 in c}
+    dist = distance_field(skin, solid - skin)
+    assert dist[(3, 3, 3)] == 3                 # 3 steps in from any face
+    assert max(dist.values()) == 3
+    assert len(dist) == len(solid) - len(skin)
 
 
 # -- runner ----------------------------------------------------------------

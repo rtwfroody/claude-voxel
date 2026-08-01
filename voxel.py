@@ -272,14 +272,53 @@ def disc_average(ramp, steps=2000):
     return _clamp_rgba(tuple(n / den for n in num))
 
 
-def _interp(knots, x):
-    """Linear interpolation over [(x, y), ...] ascending, clamped at both ends."""
+# -- curves: the two shapes a hand-measured profile comes in -----------------
+
+def interp(knots, x):
+    """Linear interpolation over `[(x, y), ...]` ascending, clamped at both ends.
+
+    The way to carry a *measured* profile into a build: a shoreline read off a
+    photograph as a handful of (depth, width) pairs, a bell's radius at eight
+    heights, a wing chord at five span fractions. Knots outside the table
+    return its end values rather than extrapolating, which is what you want
+    for a profile -- a table that stops is a shape that stops, not a shape
+    that keeps going.
+
+        SHORE = ((-75, -100), (-45, -95), (-25, -86), (0, -62))
+        left_x = int(round(interp(SHORE, y)))
+
+    Returns whatever the arithmetic gives and never rounds; round at the point
+    you paint, the same rule the color operations follow. This lived here
+    privately for a while and a build wrote its own copy anyway, purely
+    because it was not exported.
+    """
     if x <= knots[0][0]:
         return knots[0][1]
     for (x0, y0), (x1, y1) in zip(knots, knots[1:]):
         if x <= x1:
             return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
     return knots[-1][1]
+
+
+def smoothstep(t):
+    """Clamped cubic ease: 0 below 0, 1 above 1, `t*t*(3-2t)` between.
+
+    The falloff to reach for whenever one region has to blend into another --
+    a taper out from under a bridge, a bank sloping into water, the run-in of
+    a willow's shadow across a pond. A linear ramp leaves a visible crease at
+    both ends of the blend because its slope jumps; this one arrives flat.
+
+        weight = smoothstep(distance / TAPER)      # 1 at the feature, 0 past it
+
+    The clamp is the whole point of naming it: the argument is nearly always a
+    distance divided by a run length, which goes negative on one side and past
+    1 on the other, and an unclamped cubic turns back around outside [0, 1].
+    """
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+    return t * t * (3.0 - 2.0 * t)
 
 
 # -- matching a source's values onto measured colors -------------------------
@@ -365,6 +404,58 @@ def share_fractions(shares):
     return out
 
 
+def bucket_by_cuts(items, values, cuts):
+    """Group `items` into `len(cuts) + 1` sets by where each value falls.
+
+    `values` is one scalar per item, in the same order. The cuts are inclusive
+    upper bounds and must ascend -- bucket `k` holds `cuts[k-1] < v <= cuts[k]`
+    -- which is `weighted_quantiles`' convention, so its output drops straight
+    in here. Returns a list of sets, darkest bucket first if the values are
+    ranked dark to light.
+
+    Use this directly when the thresholds are themselves measured (a luma
+    boundary read off a reference); use `bucket_by_shares` when what you
+    measured is how much *area* each bucket covers.
+    """
+    groups = [set() for _ in range(len(cuts) + 1)]
+    for item, v in zip(items, values):
+        groups[bisect.bisect_left(cuts, v)].add(item)
+    return groups
+
+
+def bucket_by_shares(items, values, shares):
+    """Group `items` so each bucket gets its measured share of them.
+
+    The one call that turns "this surface is 20% shadow, 60% mid, 20% lit" and
+    a noise field into paintable sets:
+
+        vals = [fbm3(x * S, y * S, z * S, SEED) for x, y, z in cells]
+        for color, group in zip(RAMP, bucket_by_shares(cells, vals, SHARES)):
+            m.add(group, color)
+
+    Doing it by hand is three steps and every one of them has bitten a build in
+    this repo. `fbm3` is nowhere near uniform, so thresholds that look like the
+    shares select nothing like them; `weighted_quantiles` fixes that but wants
+    *cumulative* boundaries, so passing the shares straight in silently asks
+    for one bucket too many; and the quantiles have to come from the values
+    over the coordinates actually being painted, not from a larger region.
+    Here `shares` means shares, `len(shares)` buckets come back, and the cuts
+    are taken over `values` by construction.
+
+    Values are weighted by how many items carry them, so a quantised field
+    (an imported map with eight levels) splits by area rather than by how many
+    distinct levels sit below the cut. `shares` need not sum to 1.
+
+    Achieved shares differ a little from the ones asked for, because
+    `weighted_quantiles` snaps each cut to a whole value boundary. Measure the
+    result if it matters -- `color_histogram()` against the intended shares is
+    the check, and it has caught a curtain painted 34/24/42 against an
+    intended 34/58/8.
+    """
+    cuts = weighted_quantiles(Counter(values), share_fractions(shares))
+    return bucket_by_cuts(items, values, cuts)
+
+
 def rank_normalize(values):
     """Replace every value by its rank in the sample, spread over [0, 1].
 
@@ -431,7 +522,7 @@ def match_histogram(weights, ramp, distribution=None, key=None):
     for v in order:
         share = weights[v] / total
         t = cum + share / 2.0
-        out[v] = ramp_at(ramp, _interp(distribution, t)
+        out[v] = ramp_at(ramp, interp(distribution, t)
                          if distribution is not None else t)
         cum += share
     return out
@@ -1123,6 +1214,49 @@ def components(coords):
         out.append(part)
         remaining -= part
     return sorted(out, key=len, reverse=True)
+
+
+def distance_field(seeds, domain):
+    """Steps from the nearest seed cell to every reachable cell of `domain`.
+
+    Breadth-first over axis neighbours, so cells work in any dimension: 2D
+    `(x, y)` columns for a footprint, 3D `(x, y, z)` for a solid. Returns
+    `{cell: steps}` with `steps >= 1`. Seeds are not in the result, and cells
+    of `domain` that no path reaches are absent -- `dist.get(c, default)` is
+    the honest way to read it.
+
+    This is how a region gets a *gradient away from something*: a bank whose
+    height rises with its distance from the water, moss thinning away from a
+    wall, a tint that fades inland. Distance to the boundary of a region is
+    the same call with the region as the domain and everything outside it as
+    the seeds.
+
+        land = all_columns - water
+        dist = distance_field(water, land)
+        height = {c: min(MAX_H, SLOPE * dist.get(c, 1)) for c in land}
+
+    Steps are Manhattan-along-the-domain, not straight-line: a cell reachable
+    only the long way round an obstacle is correctly far away, which is the
+    point of doing it as a fill rather than as arithmetic.
+    """
+    seeds = set(seeds)
+    todo = set(domain) - seeds
+    dist = {}
+    frontier = list(seeds)
+    d = 0
+    while frontier and todo:
+        d += 1
+        nxt = []
+        for cell in frontier:
+            for i in range(len(cell)):
+                for step in (1, -1):
+                    n = cell[:i] + (cell[i] + step,) + cell[i + 1:]
+                    if n in todo:
+                        todo.discard(n)
+                        dist[n] = d
+                        nxt.append(n)
+        frontier = nxt
+    return dist
 
 
 def _unit(v):

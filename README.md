@@ -18,7 +18,7 @@ m.save("tree.vox")
 | file | what |
 | --- | --- |
 | `voxel.py` | the whole toolkit: model, shapes, palette, reader, writer, preview, CLI |
-| `test_voxel.py` | 111 tests; `python3 test_voxel.py` (also runs under pytest) |
+| `test_voxel.py` | 146 tests; `python3 test_voxel.py` (also runs under pytest) |
 | `examples/demo.py` | three worked builds showing the three authoring idioms |
 | `examples/` | the curated models that are worth keeping — read these |
 | `playground/` | scratch space for building new models; gitignored, see its README |
@@ -241,8 +241,18 @@ you are actually going to paint and take its quantiles:
 
 ```python
 vals = [fbm3(x * s, y * s, z * s, seed) for x, y, z in coords]
-cuts = weighted_quantiles({v: 1 for v in vals}, [0.25, 0.75])
+for color, group in zip(RAMP, bucket_by_shares(coords, vals, SHARES)):
+    m.add(group, color)
 ```
+
+`bucket_by_shares(items, values, shares)` is that whole chain in one call —
+quantiles taken over the values you are about to paint, per-bucket shares
+converted to the cumulative boundaries `weighted_quantiles` wants, ties
+weighted by how many items carry them — and it returns one set per share,
+darkest first. Every step of it has bitten a build here. Reach for
+`bucket_by_cuts(items, values, cuts)` when the thresholds are themselves
+measured, or when you want to demonstrate the wrong answer next to the right
+one.
 
 That is the answer when the field picks between a handful of colors. When it
 drives a **continuous** quantity instead — a height, a depth, a tint strength
@@ -259,6 +269,47 @@ Written the obvious way, `3 + 11 * fbm3(...)` spends only the middle fifth of
 3..14, and the bank it was drawing came out a ridge of near-constant height
 that three separate viewers called a wall. It takes a dict or any sequence,
 and returns the matching shape.
+
+## Profiles, falloffs and distance
+
+Three small pieces that keep turning up between "I measured a shape" and "I
+painted it".
+
+A measured profile is a table of knots — a shoreline read off a photograph as
+(depth, width) pairs, a bell's radius at eight heights, a wing chord at five
+span fractions. `interp` reads it, clamped at both ends, because a table that
+stops is a shape that stops rather than one that keeps going:
+
+```python
+SHORE = ((-75, -100), (-45, -95), (-25, -86), (0, -62))
+left_x = int(round(interp(SHORE, y)))          # round where you paint, not before
+```
+
+`smoothstep(t)` is the falloff for blending one region into another — a taper
+out from under a bridge, a bank sloping into water. Its argument is nearly
+always a distance over a run length, which goes negative on one side and past
+1 on the other, and it clamps: the bare cubic turns back around out there and
+is *negative* by `t = 2`.
+
+```python
+weight = smoothstep(distance / TAPER)          # 1 at the feature, 0 past it
+```
+
+`distance_field(seeds, domain)` gives a region a gradient away from something
+— height rising with distance from the water, moss thinning away from a wall,
+a tint fading inland. Breadth-first over axis neighbours, so it works on 2D
+`(x, y)` columns and 3D `(x, y, z)` alike:
+
+```python
+land = all_columns - water
+dist = distance_field(water, land)             # {cell: steps}, seeds excluded
+height = {c: min(MAX_H, SLOPE * dist.get(c, 1)) for c in land}
+```
+
+Steps run *through the domain*, not straight-line, so a column that a wall
+cuts off from the water is correctly far from it however close it looks on a
+map. Cells nothing reaches are absent from the result — read it with a
+default.
 
 ## Silhouettes
 
