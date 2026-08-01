@@ -274,8 +274,9 @@ python3 voxel.py info examples/robot.vox
 ## Rendering
 
 `m.render()` returns a PNG of the model as bytes, and writes it too if given a
-path. It is a plain orthographic rasterizer — flat-shaded cube faces, one
-light, a touch of ambient occlusion in the creases — written on `zlib` alone,
+path. It is a plain orthographic rasterizer — flat-shaded cube faces, a key
+light plus a low fill, a touch of ambient occlusion in the creases — written
+on `zlib` alone,
 so it needs no more than the rest of the library does.
 
 ```python

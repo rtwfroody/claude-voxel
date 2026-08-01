@@ -838,6 +838,28 @@ def test_render_darkens_the_crease_at_a_wall():
     assert min(dim) > open_floor, "the dark strip sits beside the block"
 
 
+def test_render_separates_the_walls_the_key_light_misses():
+    """Rear 3/4 view: +X wall, +Y wall and top are three distinct shades.
+
+    Without a fill light both walls clamp to the same ambient floor and the
+    corner between them vanishes. The fill is horizontal, so the underside
+    stays darker than anything the fill reaches.
+    """
+    m = Model()
+    m.box((0, 0, 0), (3, 3, 3), "white")
+    w, _, rows = _decode_png(m.render(size=48, yaw=215, pitch=25))
+    shades = {p for _, _, p in _pixels(rows, w)}
+    assert len(shades) == 3, f"want two walls + top distinct, got {sorted(shades)}"
+
+    u = Model()
+    u.voxel((0, 0, 0), "white")
+    w2, _, rows2 = _decode_png(u.render(size=48, yaw=0, pitch=-90))
+    underside = {p for _, _, p in _pixels(rows2, w2)}
+    assert len(underside) == 1, "straight up shows only the -Z face"
+    assert sum(min(underside)) < sum(min(shades)), \
+        "the underside is darker than anything the fill reaches"
+
+
 def test_render_paints_the_background_everywhere_else():
     m = Model()
     m.voxel((0, 0, 0), "red")

@@ -1090,6 +1090,7 @@ _FACES = (
 )
 
 _AMBIENT = 0.35          # light a face gets with the lamp edge-on
+_FILL = 0.15             # low fill opposite the key's azimuth; see render()
 _AO_FACTOR = 0.92        # darkening per filled cell beside an exposed face
 _MIN_CANVAS = 32         # px, so an edge-on flat model is not a sliver
 
@@ -1701,9 +1702,11 @@ class Model:
         The whole model always stays on the canvas, so an anchor off to one
         side just leaves more slack on that side.
 
-        `light` is a direction in world space, `background` anything
-        `parse_color` accepts. Palette alpha is ignored -- voxels render
-        opaque.
+        `light` is a direction in world space; a low horizontal fill
+        opposite its azimuth keeps the faces the key light cannot reach from
+        collapsing into one flat tone, while undersides take no fill and stay
+        darkest. `background` is anything `parse_color` accepts. Palette
+        alpha is ignored -- voxels render opaque.
         """
         if not self.voxels:
             raise ValueError("model is empty")
@@ -1754,6 +1757,14 @@ class Model:
 
         # -- per-face constants, computed once for the six normals
         lx, ly, lz = _unit(light)
+        # A horizontal fill opposite the key's azimuth. Every face the key
+        # reaches gets no fill, so lit faces are untouched; the far walls,
+        # which would otherwise all clamp to the same ambient floor and lose
+        # the corner between them, get a brightness that still varies with
+        # orientation. Horizontal on purpose: undersides take no fill and
+        # stay the darkest thing in frame.
+        fh = math.hypot(lx, ly)
+        fx, fy = (-lx / fh, -ly / fh) if fh > 1e-9 else (0.0, 0.0)
         faces = []
         for normal, corners, tangents in _FACES:
             nx, ny, nz = normal
@@ -1763,8 +1774,9 @@ class Model:
                 (cx * rxs[0] + cy * rxs[1] + cz * rxs[2],
                  -(cx * uxs[0] + cy * uxs[1] + cz * uxs[2]))
                 for cx, cy, cz in corners)
-            bright = _AMBIENT + (1 - _AMBIENT) * max(
-                0.0, nx * lx + ny * ly + nz * lz)
+            bright = (_AMBIENT
+                      + (1 - _AMBIENT) * max(0.0, nx * lx + ny * ly + nz * lz)
+                      + _FILL * max(0.0, nx * fx + ny * fy))
             probes = tuple((nx + tx * sign, ny + ty * sign, nz + tz * sign)
                            for tx, ty, tz in tangents for sign in (1, -1))
             faces.append((normal, offsets, probes, bright))
