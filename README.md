@@ -40,8 +40,8 @@ can centre things on the origin and build symmetric objects around `x = 0`.
 ## The three idioms
 
 **1. Primitives.** `box sphere ellipsoid cylinder cone frustum pyramid torus
-wedge polygon helix line rock tube voxel`, each taking a color as the last
-positional argument:
+wedge polygon helix line rock tube gear voxel`, each taking a color as the
+last positional argument:
 
 ```python
 m.box((-8, -8, -10), (8, 8, -8), "stone")
@@ -87,6 +87,30 @@ coarsely you sampled it. `line` gives no such guarantee — at thickness 1 it
 can leave a diagonal break. That extends to joining onto something else, using
 the same trick: run the endpoints *inside* the target rather than onto its
 surface, and the connection cannot miss by a voxel and float.
+
+`gear` is a clock or machine wheel — a rim with teeth, optional spokes and a
+hub:
+
+```python
+m.gear((0, 0, 0), 30, 6, "gold", spokes=6)                  # a wheel
+m.gear((0, 0, 0), 9, 6, "gold")                             # spokes=0: a pinion
+m.gear((0, 0, 0), 16, 6, "steel", profile="ratchet", tooth_height=4)
+```
+
+`radius` is the **pitch** radius, the circle two meshing wheels roll on, so
+the teeth stand `tooth_height` proud of it and the tip radius is
+`radius + tooth_height`. Leave `teeth` alone and the count comes from a
+constant module (`GEAR_MODULE`), which is what makes a pair actually mesh:
+tooth width in voxels is the same on a pitch-30 wheel and a pitch-9 pinion, so
+two wheels whose centre distance is the sum of their pitch radii interlock
+instead of colliding. `profile="ratchet"` gives the asymmetric pointed tooth
+of an escape wheel — a radial leading face and a trailing face sloping back —
+which is the detail that says "clockwork" rather than "another gear".
+
+`shapes.gear_parts` returns the same wheel as `{teeth, rim, spokes, hub, all}`.
+Reach for it whenever the wheel has spokes: painted one flat colour they
+disappear at render size, and painted a step darker than the rim they join the
+wheel still reads as a wheel.
 
 **2. Set algebra.** Everything in `shapes.*` returns a plain `set` of
 `(x, y, z)` tuples, so `|`, `-` and `&` compose them before you paint:
@@ -430,6 +454,22 @@ assert seated == total
 
 Probe the **whole** footprint, not a sample: checking the centre column of a
 part gives a confidently wrong answer about whether it is seated.
+
+Both of those are about geometry. The other way a part fails is by being
+*hidden* — present, connected, correctly coloured, and behind something else.
+Nothing above can see it and a render can:
+
+```python
+parts = {"escape_wheel": wheel_cells, "anchor": anchor_cells}
+seen, total = m.occlusion(parts, "y-")["escape_wheel"]
+assert seen / total > 0.7        # 0.58 was slivers through a gear in front
+```
+
+`occlusion` counts, per named part, the columns along the view axis where that
+part owns the frontmost voxel, against the columns it occupies at all.
+`facing` is `surface()`'s vocabulary and names the face turned toward the
+viewer, so `"y-"` is `preview()`'s front and `"z+"` its top. Pass every part
+at once and the ones that gained columns are the blockers.
 
 For anything built in radial layers — a ring system, a tree stump, a
 dartboard, a gasket — `radial_profile` walks outward through a plane and

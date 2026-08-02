@@ -52,13 +52,15 @@ Model()                       .voxel(pos,c) .box(a,b,c) .sphere(ctr,r,c)
                               .pyramid(base,hw,h,c) .torus(ctr,R,r,c) .line(a,b,c)
                               .wedge(a,b,c) .polygon(pts,off,h,c)
                               .helix(base,r,h,c) .rock(ctr,(rx,ry,rz),c)
-                              .tube(points,r,c)
+                              .tube(points,r,c) .gear(ctr,r,thick,c)
   edits                       .add(coords,c) .add_under(coords,c) .remove(coords)
                               .keep(coords) .merge(other,offset) .mirror(axis,at)
                               .translate(off) .rotate90(axis,turns) .scale(n)
                               .recolor(old,new) .center(axes) .copy()
   queries                     len() `in` .coords() .bounds .size .stats()
                               .color_histogram() .surface(facing) .support(coords)
+                              .occlusion(parts,facing)  {name:(visible,total)}
+                              columns where the part is the frontmost voxel
                               .detached() .components()
                               .radial_profile(ctr,dir,normal,r_lo,r_hi)
   io                          .save(path) Model.load(path) Model.from_layers(...)
@@ -78,6 +80,12 @@ Scene()                       .place(model,offset) .voxel(pos,c) .add(coords,c)
 shapes.*                      box sphere ellipsoid cylinder cone frustum pyramid
                               torus line wedge polygon helix rock tube where
                               silhouette_hull(front,side,top)
+                              gear(ctr,r,thickness, teeth=None, tooth_height=3,
+                                   profile="square"|"ratchet", spokes=0,
+                                   hub_radius=, rim_width=, axis=)
+                              gear_parts(...)  the same wheel as
+                              {teeth,rim,spokes,hub,all}, to shade the regions
+                              apart; GEAR_MODULE sets the default tooth count
                               -- all return set[(x,y,z)]
 transforms                    translate mirror rotate90 scale bounds components
                               distance_field(seeds,domain)  {cell:steps} by BFS
@@ -153,8 +161,16 @@ built one piece at a time and each piece freed. `Model.load()` reads it back
 into world coordinates. Use it only when something genuinely exceeds 256 — a
 single `Model` is more compatible and easier to preview.
 
+`gear` is a clock or machine wheel: a rim with teeth, optional spokes and a
+hub, cut around the **pitch** radius, so a pair whose centre distance is the
+sum of their pitch radii meshes. Leave `teeth` alone and both wheels are cut
+at the same module, which is what makes that true. `profile="ratchet"` is the
+asymmetric pointed escape-wheel tooth. Use `gear_parts` when the wheel has
+spokes: one flat colour and they vanish at render size, a step darker than the
+rim and the wheel still reads as a wheel.
+
 `hollow=True, thickness=n` on box/sphere/ellipsoid/cylinder. `axis="x"|"y"|"z"`
-on cylinder/cone/pyramid/torus. Colors are names from `NAMED_COLORS`, `"#rrggbb"`,
+on cylinder/cone/pyramid/torus/gear. Colors are names from `NAMED_COLORS`, `"#rrggbb"`,
 or `(r,g,b[,a])`.
 
 ## The three idioms
@@ -193,7 +209,14 @@ object is right. Every bug so far was invisible in it. Run these:
    ```python
    n = sum(1 for p in footprint if (p[0], p[1], surface_z) in m)
    ```
-5. **`python3 test_voxel.py`** after touching `voxel.py` (111 tests).
+5. **Occlusion check** for anything meant to be *seen* — a part can be
+   present, connected, correctly coloured and entirely behind something else,
+   which passes every check above and shows only in a render:
+   ```python
+   seen, total = m.occlusion({"escapement": cells}, "y-")["escapement"]
+   ```
+   Pass every part at once and the ones that gained columns are the blockers.
+6. **`python3 test_voxel.py`** after touching `voxel.py` (169 tests).
 
 For legibility of text or fine detail, project just those voxels rather than
 previewing the whole model:
@@ -233,6 +256,12 @@ cells = {(x,z) for (x,y,z),i in m.voxels.items() if m.palette.rgba(i)==target}
   entirely with `bucket_by_shares`, where `shares` means shares — and keep the
   measured shares in the constant, where they can be checked against the
   measurement.
+- **A ratchet tooth can shed its own point.** The tip is a tenth of the tooth
+  pitch, so at the default module it is ~0.65 voxels wide and quantisation can
+  cut it loose — the clockface's escape wheel carries a 6-voxel fragment that
+  `detached()` missed only because it happened to touch the pinion behind it.
+  Keep the tip at a voxel or more (fewer `teeth` for the radius) or check
+  `components()` on the wheel itself, not on the assembled model.
 - **Mirror seam.** `m.mirror("x", at=0)` reflects across `x=0`, and column 0 is
   its own mirror image. Parts crossing the centreline must start *at* `x=0`;
   starting at `x=1` leaves a one-voxel gap down the middle.

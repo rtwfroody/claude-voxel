@@ -7,13 +7,13 @@ import sys
 import tempfile
 import zlib
 
-from voxel import (MAX_DIM, Model, Palette, Scene, bounds, bucket_by_cuts,
-                   bucket_by_shares, chroma, components, disc_average,
-                   distance_field, fbm3, interp, luma, match_histogram, mirror,
-                   noise3, parse_color, ramp_at, rank_normalize, relight,
-                   rotate90, scale, scale_color, shapes, share_fractions,
-                   smoothstep, to_hex, translate, weighted_quantiles, _main,
-                   _walk_chunks)
+from voxel import (GEAR_MODULE, MAX_DIM, Model, Palette, Scene, bounds,
+                   bucket_by_cuts, bucket_by_shares, chroma, components,
+                   disc_average, distance_field, fbm3, interp, luma,
+                   match_histogram, mirror, noise3, parse_color, ramp_at,
+                   rank_normalize, relight, rotate90, scale, scale_color,
+                   shapes, share_fractions, smoothstep, to_hex, translate,
+                   weighted_quantiles, _main, _walk_chunks)
 
 
 def _tmp(name="t.vox"):
@@ -1686,6 +1686,287 @@ def test_distance_field_works_in_three_dimensions():
     assert dist[(3, 3, 3)] == 3                 # 3 steps in from any face
     assert max(dist.values()) == 3
     assert len(dist) == len(solid) - len(skin)
+
+
+# -- gears -------------------------------------------------------------------
+
+def _tooth_lobes(parts, radius):
+    """Connected tooth roots -- one island per tooth.
+
+    The root band only: a ratchet tooth narrows to a point, and past the
+    first voxel or two the tip is a ragged line that can break into pieces
+    (see the shedding test below), which would inflate an island count taken
+    over the whole tooth.
+    """
+    root = {c for c in parts["teeth"]
+            if math.hypot(c[0], c[1]) <= radius + 1.5}
+    return len(components(root))
+
+
+def test_gear_cuts_the_tooth_count_it_is_asked_for():
+    for n in (9, 15, 24, 40):
+        parts = shapes.gear_parts((0, 0, 0), 30, 1, teeth=n)
+        assert _tooth_lobes(parts, 30) == n, f"asked for {n} teeth"
+
+
+def test_gear_tooth_count_defaults_to_a_constant_module():
+    """Two wheels cut at the same module mesh; that is the whole point.
+
+    Tooth width in voxels must come out the same on a big wheel and a small
+    pinion, so the count has to scale with the radius, not be a fixed number.
+    """
+    for radius in (9, 16, 30):
+        parts = shapes.gear_parts((0, 0, 0), radius, 1)
+        want = int(round(2 * math.pi * radius / GEAR_MODULE))
+        assert _tooth_lobes(parts, radius) == want
+        arc = 2 * math.pi * radius / want
+        assert abs(arc - GEAR_MODULE) < 0.6, "same tooth pitch at every size"
+
+
+def test_gear_teeth_stand_proud_of_the_pitch_radius():
+    """`radius` is the pitch circle; the tip radius is radius + height.
+
+    A mesh audit measures centre distance against the sum of the *pitch*
+    radii, so a gear that quietly reported its tip radius as its size would
+    put every meshing pair a tooth-height too far apart.
+    """
+    for radius, height in ((30, 3), (16, 4), (9, 2)):
+        parts = shapes.gear_parts((0, 0, 0), radius, 1, tooth_height=height)
+        tip = max(math.hypot(x, y) for x, y, _ in parts["teeth"])
+        assert abs(tip - (radius + height)) <= 0.6, f"tip {tip}"
+        body = max(math.hypot(x, y) for x, y, _ in parts["rim"])
+        assert abs(body - radius) <= 0.6, f"rim {body}"
+
+
+def test_gear_spokes_cross_the_wheel_and_leave_it_one_piece():
+    for count in (3, 4, 5, 6):
+        parts = shapes.gear_parts((0, 0, 0), 30, 2, spokes=count)
+        assert len(components(parts["spokes"])) == count
+        assert len(components(parts["all"])) == 1, \
+            "a spoke that reaches neither hub nor rim leaves a loose ring"
+
+
+def test_gear_spokes_leave_windows_and_zero_spokes_does_not():
+    """`spokes=0` is a solid pinion, not a wheel with no spokes in it."""
+    spoked = shapes.gear_parts((0, 0, 0), 30, 1, spokes=4)
+    solid = shapes.gear_parts((0, 0, 0), 30, 1, spokes=0)
+    assert not solid["spokes"]
+    assert (0, 0, 0) in solid["rim"] and (0, 0, 0) in solid["all"]
+    assert len(spoked["all"]) < len(solid["all"]), "windows between the spokes"
+    # Every voxel of the spoked wheel is in the solid one: same outline.
+    assert spoked["all"] <= solid["all"] | spoked["teeth"]
+
+
+def test_gear_spokes_are_phased_off_the_axes():
+    """An even spoke count laid on the axes reads as a cross over the scene.
+
+    The half-spacing phase is what keeps four spokes diagonal, which is a
+    composition fix that cost a vision round elsewhere in this repo.
+    """
+    parts = shapes.gear_parts((0, 0, 0), 30, 1, spokes=4)
+    on_axis = {c for c in parts["spokes"] if c[0] == 0 or c[1] == 0}
+    assert not on_axis, "spokes landed on the axes"
+
+
+def test_gear_ratchet_teeth_are_asymmetric_and_square_ones_are_not():
+    """The escape-wheel tell: one radial face, one sloping back to the root.
+
+    Measured as the angular span of a single tooth at its root and at its
+    tip. A square tooth loses width off both edges; a ratchet tooth keeps its
+    leading edge and loses all of it off the trailing one.
+    """
+    radius, height, n = 16, 4, 15
+
+    def span(profile, lo, hi):
+        parts = shapes.gear_parts((0, 0, 0), radius, 1, teeth=n,
+                                  tooth_height=height, profile=profile)
+        fracs = []
+        for x, y, _ in parts["teeth"]:
+            r = math.hypot(x, y)
+            if lo <= r - radius <= hi:
+                fracs.append((math.atan2(x, y) % (2 * math.pi)
+                              / (2 * math.pi) * n) % 1.0)
+        return min(fracs), max(fracs)
+
+    r_root_lo, r_root_hi = span("ratchet", 0.0, 1.0)
+    r_tip_lo, r_tip_hi = span("ratchet", height - 1.0, height)
+    assert r_tip_hi < r_root_hi - 0.2, "trailing face must slope back"
+    assert abs(r_tip_lo - r_root_lo) < 0.06, "leading face must stay radial"
+
+    s_root_lo, s_root_hi = span("square", 0.0, 1.0)
+    s_tip_lo, s_tip_hi = span("square", height - 1.0, height)
+    assert s_tip_lo > s_root_lo and s_tip_hi < s_root_hi, "tapers both sides"
+    assert abs((s_tip_lo - s_root_lo) - (s_root_hi - s_tip_hi)) < 0.06, \
+        "and symmetrically, unlike the ratchet"
+
+
+def test_gear_ratchet_tips_shed_fragments_below_one_voxel():
+    """The documented trap, shown on the geometry rather than asserted away.
+
+    A ratchet tip is a tenth of the tooth pitch, so at the default module it
+    is only ~0.65 voxels wide and quantisation can cut the point off its own
+    tooth. Keep the tip at a voxel or more -- fewer teeth for the radius --
+    and the wheel is one piece.
+    """
+    shed = shapes.gear((0, 0, 0), 16, 1, teeth=15, tooth_height=4,
+                       profile="ratchet")
+    assert len(components(shed)) > 1, "the sub-voxel tip case really does bite"
+    for n in (6, 8, 10):                         # tip >= 1.0 voxel
+        assert 0.10 * 2 * math.pi * 16 / n >= 1.0
+        whole = shapes.gear((0, 0, 0), 16, 1, teeth=n, tooth_height=4,
+                            profile="ratchet")
+        assert len(components(whole)) == 1, f"{n} teeth should hold together"
+    # Square teeth are never this narrow.
+    for radius in (8, 16, 30):
+        assert len(components(shapes.gear((0, 0, 0), radius, 1))) == 1
+
+
+def test_gear_axis_variants_are_the_same_wheel_turned():
+    """Same 2-D cut in every axis's plane, extruded along the axis it names."""
+    kw = dict(teeth=12, tooth_height=3, spokes=5)
+    flat = {}
+    for axis in "xyz":
+        ai = "xyz".index(axis)
+        u, v = [i for i in range(3) if i != ai]
+        g = shapes.gear((0, 0, 0), 20, 4, axis=axis, **kw)
+        assert {c[ai] for c in g} == {0, 1, 2, 3}, "thickness runs along axis"
+        flat[axis] = {(c[u], c[v]) for c in g}
+    assert flat["x"] == flat["y"] == flat["z"]
+
+
+def test_gear_center_is_the_low_face_like_a_cylinder_base():
+    g = shapes.gear((5, -2, 7), 12, 3, axis="z")
+    assert min(c[2] for c in g) == 7 and max(c[2] for c in g) == 9
+    assert (5, -2, 7) in g and (5, -2, 9) in g   # solid: hub on the centre
+    lo, hi = bounds(g)
+    assert (lo[0] + hi[0]) / 2 == 5 and (lo[1] + hi[1]) / 2 == -2
+
+
+def test_gear_parts_are_the_regions_of_gear():
+    parts = shapes.gear_parts((0, 0, 0), 26, 2, spokes=5)
+    assert parts["all"] == shapes.gear((0, 0, 0), 26, 2, spokes=5)
+    assert parts["all"] == (parts["teeth"] | parts["rim"]
+                            | parts["spokes"] | parts["hub"])
+    assert not (parts["spokes"] & parts["rim"])
+    assert not (parts["spokes"] & parts["hub"])
+    assert not (parts["hub"] & parts["rim"])
+
+
+def test_gear_hub_and_rim_can_be_overridden():
+    parts = shapes.gear_parts((0, 0, 0), 30, 1, spokes=4,
+                              hub_radius=10, rim_width=6)
+    hub = max(math.hypot(x, y) for x, y, _ in parts["hub"])
+    assert abs(hub - 10) <= 0.6
+    inner = min(math.hypot(x, y) for x, y, _ in parts["rim"])
+    assert abs(inner - (30 - 6)) <= 0.6
+
+
+def test_gear_hub_and_rim_have_floors_a_small_wheel_needs():
+    """Proportional alone, a nine-voxel pinion gets a two-voxel hub.
+
+    Which is not enough metal to bury an axle in, and an axle that ends in
+    fresh air is the failure `detached()` was written for.
+    """
+    parts = shapes.gear_parts((0, 0, 0), 9, 1, spokes=4)
+    hub = max(math.hypot(x, y) for x, y, _ in parts["hub"])
+    assert hub >= 3.5, f"hub radius {hub} on a small wheel"
+    inner = min(math.hypot(x, y) for x, y, _ in parts["rim"])
+    assert 9 - inner >= 2.5, f"rim only {9 - inner} deep"
+
+
+def test_gear_rejects_an_unknown_profile():
+    try:
+        shapes.gear((0, 0, 0), 10, 1, profile="involute")
+    except ValueError as e:
+        assert "profile" in str(e)
+    else:
+        raise AssertionError("bad profile should raise")
+
+
+def test_model_gear_paints():
+    m = Model()
+    m.gear((0, 0, 0), 12, 2, "metal", spokes=4)
+    assert len(m) == len(shapes.gear((0, 0, 0), 12, 2, spokes=4))
+    assert set(m.voxels.values()) == {m.palette.index("metal")}
+
+
+# -- occlusion ---------------------------------------------------------------
+
+def _two_plates(back_x0):
+    """A 4x4 plate at y=0 and another at y=5, offset by `back_x0` in x."""
+    m = Model()
+    front = shapes.box((0, 0, 0), (3, 0, 3))
+    back = shapes.box((back_x0, 5, 0), (back_x0 + 3, 5, 3))
+    m.add(front, "red")
+    m.add(back, "blue")
+    return m, {"front": front, "back": back}
+
+
+def test_occlusion_reports_a_hidden_part_as_hidden():
+    """The bug that passes every other check: present, connected, invisible."""
+    m, parts = _two_plates(0)
+    assert m.occlusion(parts, "y-") == {"front": (16, 16), "back": (0, 16)}
+    # Nothing else notices: both parts are all there and the model is sound.
+    assert len(parts["back"]) == 16
+    assert m.detached(seed=(0, 0, 0)) == parts["back"]   # not even detached()
+    assert m.support(parts["back"], offset=(0, -5, 0)) == (16, 16)
+
+
+def test_occlusion_counts_the_columns_that_show():
+    """Half-covered plate: 8 of its 16 columns are behind the front one."""
+    m, parts = _two_plates(2)
+    assert m.occlusion(parts, "y-") == {"front": (16, 16), "back": (8, 16)}
+
+
+def test_occlusion_from_the_other_side_swaps_them():
+    m, parts = _two_plates(0)
+    assert m.occlusion(parts, "y+") == {"front": (0, 16), "back": (16, 16)}
+    # Seen from above, neither plate blocks the other and each is four
+    # columns wide -- the columns are (x, y) now, not (x, z).
+    assert m.occlusion(parts, "z+") == {"front": (4, 4), "back": (4, 4)}
+
+
+def test_occlusion_counts_a_blocker_that_was_not_passed_in_as_a_blocker():
+    """`parts` names what you are asking about, not what can hide it."""
+    m, parts = _two_plates(0)
+    assert m.occlusion({"back": parts["back"]}, "y-") == {"back": (0, 16)}
+
+
+def test_occlusion_counts_an_unpainted_part_as_hidden():
+    """A generator's coordinate set that a later paint pass never wrote.
+
+    The set exists in Python and shows up in every count taken off the
+    generator; the model has nothing there.
+    """
+    m = Model()
+    m.add(shapes.box((0, 0, 0), (3, 0, 3)), "red")
+    ghost = shapes.box((0, 9, 0), (3, 9, 3))
+    assert m.occlusion({"ghost": ghost}, "y-") == {"ghost": (0, 16)}
+
+
+def test_occlusion_credits_both_of_two_overlapping_parts():
+    m = Model()
+    a = shapes.box((0, 0, 0), (3, 0, 3))
+    b = shapes.box((2, 0, 0), (5, 0, 3))
+    m.add(a | b, "red")
+    assert m.occlusion({"a": a, "b": b}, "y-") == {"a": (16, 16), "b": (16, 16)}
+
+
+def test_occlusion_reads_as_a_fraction_for_an_assert():
+    m, parts = _two_plates(2)
+    seen, total = m.occlusion(parts, "y-")["back"]
+    assert seen / total == 0.5
+
+
+def test_occlusion_rejects_a_bad_facing():
+    m, parts = _two_plates(0)
+    for bad in ("front", "y", "w-", "y*"):
+        try:
+            m.occlusion(parts, bad)
+        except ValueError as e:
+            assert "facing" in str(e)
+        else:
+            raise AssertionError(f"{bad!r} should raise")
 
 
 # -- runner ----------------------------------------------------------------

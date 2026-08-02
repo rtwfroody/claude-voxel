@@ -658,6 +658,30 @@ def fbm3(x, y, z, seed=0, octaves=4, lacunarity=2.0, gain=0.5):
 # shapes -- every function returns a set of (x, y, z) integer coordinates
 # --------------------------------------------------------------------------
 
+_TAU = 2.0 * math.pi
+
+#: Teeth per wheel default to `round(2 pi R / GEAR_MODULE)`. A constant module
+#: is what makes two gears mesh: tooth width in voxels comes out the same on a
+#: pitch-30 wheel and a pitch-9 pinion, so a pair whose centre distance is the
+#: sum of their pitch radii interlocks instead of colliding.
+GEAR_MODULE = 6.5
+
+# Wheel proportions, as fractions of the pitch radius, floored so a nine-voxel
+# pinion still has a hub wide enough to bury an axle in.
+_GEAR_RIM_FRACTION = 0.18
+_GEAR_HUB_FRACTION = 0.22
+_GEAR_SPOKE_FRACTION = 0.075
+_GEAR_MIN_RIM = 3
+_GEAR_MIN_HUB = 4
+_GEAR_MIN_SPOKE_HALF = 1.5
+
+# Tooth profiles, as fractions of one tooth's angular pitch.
+_GEAR_TOOTH_FRACTION = 0.52   # square: angular width at the pitch circle
+_GEAR_TOOTH_TAPER = 0.18      # ...shrinking by this much at the tip
+_GEAR_RATCHET_BASE = 0.62     # ratchet: angular width at the root
+_GEAR_RATCHET_TIP = 0.10      # ...and at the point
+
+
 class shapes:
     """Shape constructors. Combine with set operators.
 
@@ -795,6 +819,155 @@ class shapes:
                         p[v] += dv
                         out.add(tuple(p))
         return out
+
+    @staticmethod
+    def gear(center, radius, thickness, teeth=None, tooth_height=3,
+             profile="square", spokes=0, hub_radius=None, rim_width=None,
+             axis="z"):
+        """A toothed wheel of pitch `radius`, `thickness` voxels along `axis`.
+
+        `center` is the centre of the face at the low end of `axis`, like
+        `cylinder`'s `base`, and the wheel extends `thickness` voxels along it.
+        `radius` is the *pitch* radius -- the circle two meshing wheels roll
+        on, and the one a mesh audit measures -- so the teeth stand
+        `tooth_height` voxels proud of it and the real tip radius is
+        `radius + tooth_height`.
+
+        `teeth` defaults to a constant module (see `GEAR_MODULE`), which is
+        what lets a pair of wheels mesh. `profile` is "square", a crenellated
+        rim that slightly narrows toward the tip, or "ratchet", the asymmetric
+        pointed tooth of an escape wheel -- a radial leading face and a
+        trailing face sloping back to the root. Ratchet teeth are the detail
+        that says "escapement" rather than "another gear" at a glance.
+
+        `spokes=0` gives a solid disc (a pinion); any positive count crosses
+        the wheel with that many spokes between a `hub_radius` hub and a rim
+        `rim_width` deep, all three defaulting to proportions of `radius`. The
+        spokes are phased half a spacing, so an even count comes out diagonal
+        rather than as an axis-aligned cross laid over whatever is behind it.
+
+        Teeth and spokes are phased from the second of the two axes `axis`
+        leaves toward the first (for `axis="y"`, from +Z toward +X -- clock
+        angles, measured clockwise from twelve as seen from the front).
+
+        Use `gear_parts()` when the regions need shading separately.
+        """
+        return shapes.gear_parts(center, radius, thickness, teeth=teeth,
+                                 tooth_height=tooth_height, profile=profile,
+                                 spokes=spokes, hub_radius=hub_radius,
+                                 rim_width=rim_width, axis=axis)["all"]
+
+    @staticmethod
+    def gear_parts(center, radius, thickness, teeth=None, tooth_height=3,
+                   profile="square", spokes=0, hub_radius=None,
+                   rim_width=None, axis="z"):
+        """`gear()` split into its regions, as a dict of coordinate sets.
+
+        Keys are "teeth", "rim", "spokes", "hub" and "all". A wheel and its
+        teeth are one object to a set-algebra caller and four regions to a
+        painter, and the difference matters: a wheel painted one flat colour
+        loses its spokes at render size, where the same wheel with the spokes
+        a step darker than the rim they join still reads as a wheel. The parts
+        are disjoint except that a solid wheel's hub lies inside its "rim",
+        which is then the whole disc.
+        """
+        if profile not in ("square", "ratchet"):
+            raise ValueError(
+                f"bad profile {profile!r}; want 'square' or 'ratchet'")
+        ai = "xyz".index(axis)
+        u, v = [i for i in range(3) if i != ai]
+        cu, cv, c0 = center[u], center[v], center[ai]
+
+        n = (int(round(_TAU * radius / GEAR_MODULE)) if teeth is None
+             else teeth)
+        rim_w = (max(_GEAR_MIN_RIM, int(round(radius * _GEAR_RIM_FRACTION)))
+                 if rim_width is None else rim_width)
+        hub_r = (max(_GEAR_MIN_HUB, int(round(radius * _GEAR_HUB_FRACTION)))
+                 if hub_radius is None else hub_radius)
+
+        # Every region is a flat cut in the plane `axis` leaves, extruded over
+        # the whole thickness -- so a part cannot leak along the axis, because
+        # the axis is never free. `slab` is that cut: a 2-D test on the offset
+        # from the centre, run over a box that `reach` has to bound.
+        def slab(reach, test, ou=0, ov=0):
+            lim = int(math.ceil(reach)) + 1
+            a, b = [0, 0, 0], [0, 0, 0]
+            a[u], b[u] = ou - lim, ou + lim
+            a[v], b[v] = ov - lim, ov + lim
+            a[ai], b[ai] = c0, c0 + thickness - 1
+            return shapes.where(tuple(a), tuple(b),
+                                lambda x, y, z: test((x, y, z)[u] - ou,
+                                                     (x, y, z)[v] - ov))
+
+        def annulus(r_in, r_out):
+            lo, hi = float(r_in), float(r_out)
+            return slab(hi, lambda du, dv:
+                        lo - 0.5 <= math.hypot(du, dv) <= hi + 0.5, cu, cv)
+
+        def bar(p0, p1, half_width):
+            """Rounded-ended bar between two in-plane points, about the centre.
+
+            Rounded, so a chain of bars is connected by construction.
+            """
+            (u0, v0), (u1, v1) = p0, p1
+            su, sv = u1 - u0, v1 - v0
+            length2 = float(su * su + sv * sv)
+            mu, mv = int(round((u0 + u1) / 2.0)), int(round((v0 + v1) / 2.0))
+            reach = math.hypot(su, sv) / 2.0 + half_width + 2.0
+
+            def test(du, dv):
+                pu, pv = mu + du - u0, mv + dv - v0
+                t = 0.0 if length2 == 0.0 else (pu * su + pv * sv) / length2
+                t = min(1.0, max(0.0, t))
+                return math.hypot(pu - t * su, pv - t * sv) <= half_width + 0.5
+
+            return slab(reach, test, mu, mv)
+
+        height = float(tooth_height)
+        if n > 0 and height > 0.0:
+            def tooth(du, dv):
+                r = math.hypot(du, dv)
+                if not (radius - 0.5 < r <= radius + height + 0.5):
+                    return False
+                depth = min(1.0, max(0.0, (r - radius) / height))
+                frac = (math.atan2(du, dv) % _TAU / _TAU * n) % 1.0
+                if profile == "ratchet":
+                    width = (_GEAR_RATCHET_BASE * (1.0 - depth)
+                             + _GEAR_RATCHET_TIP)
+                    return frac <= width
+                half = (_GEAR_TOOTH_FRACTION
+                        - _GEAR_TOOTH_TAPER * depth) / 2.0
+                return abs(frac - 0.5) <= half
+
+            teeth_cells = slab(radius + height, tooth, cu, cv)
+        else:
+            teeth_cells = set()
+
+        hub = annulus(0.0, hub_r)
+        if spokes <= 0:
+            rim, crossings = annulus(0.0, radius), set()
+        else:
+            rim = annulus(radius - rim_w, radius)
+            half = max(_GEAR_MIN_SPOKE_HALF, radius * _GEAR_SPOKE_FRACTION)
+            crossings = set()
+            for k in range(spokes):
+                theta = _TAU * (k + 0.5) / spokes
+                du, dv = math.sin(theta), math.cos(theta)
+                # Both ends overrun their target by a voxel, so a spoke is
+                # face-adjacent to the hub and the rim rather than near them.
+                crossings |= bar((du * (hub_r - 1), dv * (hub_r - 1)),
+                                 (du * (radius - rim_w + 1),
+                                  dv * (radius - rim_w + 1)), half)
+            # The bars were cut about the origin; shift them onto the centre.
+            crossings = {p[:u] + (p[u] + cu,) + p[u + 1:v]
+                         + (p[v] + cv,) + p[v + 1:] for p in crossings}
+            crossings -= rim | hub
+
+        parts = {"teeth": teeth_cells, "rim": rim, "spokes": crossings,
+                 "hub": hub}
+        parts["all"] = (parts["teeth"] | parts["rim"]
+                        | parts["spokes"] | parts["hub"])
+        return parts
 
     @staticmethod
     def line(a, b, thickness=1):
@@ -1396,6 +1569,9 @@ class Model:
     def pyramid(self, base, half_width, height, color, **kw):
         return self.add(shapes.pyramid(base, half_width, height, **kw), color)
 
+    def gear(self, center, radius, thickness, color, **kw):
+        return self.add(shapes.gear(center, radius, thickness, **kw), color)
+
     def torus(self, center, major, minor, color, **kw):
         return self.add(shapes.torus(center, major, minor, **kw), color)
 
@@ -1608,6 +1784,63 @@ class Model:
             if (x + dx, y + dy, z + dz) in self.voxels:
                 n += 1
         return n, total
+
+    def occlusion(self, parts, facing="y-"):
+        """(visible, total) columns per named part, seen from `facing`.
+
+        The failure no geometric check can see: a part that is present,
+        connected, correctly coloured, the right size -- and entirely behind
+        something else. Every check passes and the render shows nothing.
+
+        `parts` is {name: coord_set}, the sets the generators returned, and
+        the result is {name: (visible, total)} -- the same shape as
+        `support()`, so it reads straight into an assert:
+
+            seen, total = m.occlusion(parts, "y-")["escape_wheel"]
+            assert seen / total > 0.7, f"escapement hidden: {seen}/{total}"
+
+        `facing` uses `surface()`'s vocabulary and names the face turned
+        toward the viewer, so "y-" is `preview()`'s front and "z+" its top.
+        `total` counts the columns along that axis in which the part has any
+        voxel; `visible` those where the nearest voxel *of the whole model* is
+        one of the part's. A part hidden behind something that was not passed
+        in, or never painted into the model at all, therefore counts as
+        hidden, which is the point -- and where parts overlap, both are
+        credited with the shared column.
+
+        Pass every part at once and the ones that gained columns are the
+        blockers.
+        """
+        if (len(facing) != 2 or facing[0] not in "xyz"
+                or facing[1] not in "+-"):
+            raise ValueError(f"bad facing {facing!r}; want e.g. 'y-'")
+        ai = "xyz".index(facing[0])
+        sign = 1 if facing[1] == "+" else -1
+
+        nearest = {}
+        for c in self.voxels:
+            col = c[:ai] + c[ai + 1:]
+            w = nearest.get(col)
+            if w is None or sign * c[ai] > sign * w:
+                nearest[col] = c[ai]
+
+        out = {}
+        for name, coords in parts.items():
+            seen = set()
+            visible = 0
+            for c in coords:
+                col = c[:ai] + c[ai + 1:]
+                if col in seen:
+                    continue
+                seen.add(col)
+                w = nearest.get(col)
+                if w is None:
+                    continue
+                front = col[:ai] + (w,) + col[ai:]
+                if front in coords:
+                    visible += 1
+            out[name] = (visible, len(seen))
+        return out
 
     # -- connectivity -------------------------------------------------------
     # Assembled models tend to fail by having a part float a voxel away from
