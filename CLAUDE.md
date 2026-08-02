@@ -285,11 +285,15 @@ cells = {(x,z) for (x,y,z),i in m.voxels.items() if m.palette.rgba(i)==target}
   global and applies there too. Solid interiors are fine — give them a distinct
   color so a cut-away reads correctly rather than showing a uniform blob.
 - **`_t` is a center, not a corner.** Anything touching the scene graph has to
-  place a model's minimum corner at `_t - size // 2`. See `notes.md`.
+  place a model's minimum corner at `_t - size // 2` (floor division), and
+  every chunk should be written at the full 256³ `SIZE` even when nearly empty:
+  with equal sizes a convention slip shifts the whole world uniformly and
+  harmlessly, with tight per-chunk bounds it tears the world apart at every
+  seam. A round-trip test cannot catch this — `save()` adds `size // 2` and
+  `load()` subtracts it, so they agree no matter what the convention is; it was
+  settled against `ogt_vox.h` and foreign `.vox` files.
 
 ## Housekeeping
 
-- Log newly-solved problems in `notes.md`, including checks that *didn't* work
-  and why — that file is where the traps above came from.
 - Keep `README.md` accurate when the API changes; add tests to
   `test_voxel.py` for anything added to `voxel.py`.

@@ -38,23 +38,24 @@ SEED = 20260729
 # ordering of tones are kept; what is stretched is the *spacing*, because
 # photo-accurate medians read as mud at voxel scale.
 #
-# notes.md is RIGHT that a brown pelican is near-neutral, and the number holds
-# up under scrutiny: white-balanced whole-bird median chroma across 8 photos is
+# A brown pelican really is near-neutral (despite the name), and the number
+# holds up under scrutiny: white-balanced whole-bird median chroma across 8 photos is
 # 4, 5, 7, 8, 8, 18, 18, 28 -- median 8.  The three warm outliers are the
 # warm-lit frames (18, 11, 15); five independent photos agree on near-neutral.
 # An intermediate version of this file trusted those three and pushed the
-# plumage to chroma 25-31, which devscripts/plumage_match.py correctly rejected.
+# plumage to chroma 25-31, which the surface-chroma check (the since-deleted
+# plumage_match.py) correctly rejected.
 # Per-photo white balance was not enough to save them, probably because the
 # brightest-pixel reference lands partly on the genuinely cream crown and so
 # under-corrects.
 #
-# What notes.md gets WRONG is VALUE, and that is a separate axis from chroma:
+# What earlier measurement passes got WRONG is VALUE, a separate axis from chroma:
 #
 #   white head / foreneck   luma ~210-230, chroma 7    pale and near-neutral
 #   back / upperwing        luma  ~82-141, chroma 10-12  MID, not pale
 #   remiges / belly         luma   ~30-45, chroma 8      dark
 #
-# The earlier note recorded the mantle as #57575a; a still earlier draft of this
+# One such pass recorded the mantle as #57575a; a still earlier draft of this
 # file had it at #b0aca7, luma 137.  Measured on a frame that actually shows the
 # back it is luma ~92.  Getting value right is what fixes the "flat" complaint;
 # getting chroma right is what keeps it a pelican rather than a khaki bird.
@@ -123,7 +124,8 @@ TAIL_Y0, TAIL_Y1 = 52, 66
 # (y, half_width, z_centre, half_height) -- lofted elliptical sections.
 # The four forward sections exist to sweep the breast up to the throat.  Without
 # them the torso began at y=-6 with a 10-voxel vertical wall under the neck --
-# the "sheer face" class from notes.md, which no connectivity check can see.
+# a sheer-face bug, the class no connectivity check can see: the wall is one
+# soundly connected piece, and only the underside profile shows the cliff.
 BODY = [
     (-14, 3.2,  8.0,  3.0),
     (-11, 4.0,  6.5,  4.5),
@@ -574,8 +576,9 @@ def build():
     # over the upper pouch, with a bright rust band along the LOWER edge (upper
     # #572e28 chroma 47 vs lower #86462f chroma 87).  So the gradient runs
     # ventrally, not along the length, with a mild along-length darkening toward
-    # the throat.  Shading the underside is safe; shading the lateral rim is what
-    # notes.md forbids, because the rim is what every side projection shows.
+    # the throat.  Shading the underside is safe; shading the lateral rim is not,
+    # because the rim is what every side projection shows -- rim-shaded scarlet
+    # never wins the depth test and vanishes from every view.
     for (x, y, z) in pouch:
         m.voxel((x, y, z), POUCH_C if y <= -25 else POUCH_D)
     floor_of = {}
@@ -671,7 +674,8 @@ def check(m):
 
     # Compare the stripe against the LOCAL BODY WIDTH at the same y, not against
     # NAPE_HW.  A check keyed on the constant the paint is derived from cannot
-    # fail -- notes.md logs four separate instances.  This version fails if the
+    # fail -- that vacuous-check trap has struck four separate times in this
+    # project.  This version fails if the
     # x-clamp is ever dropped, which is the bug that actually happened
     # (chestnut wrapping the whole width as a saddle: the "brown hump").
     # A stripe is FLANKED: at every y it occupies, un-chestnut voxels must remain
