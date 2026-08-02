@@ -1359,6 +1359,98 @@ def bounds(coords):
     return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
 
 
+def _facing(facing):
+    """(axis index, sign) for a face name like 'y-'."""
+    if len(facing) != 2 or facing[0] not in "xyz" or facing[1] not in "+-":
+        raise ValueError(f"bad facing {facing!r}; want e.g. 'z+'")
+    return "xyz".index(facing[0]), (1 if facing[1] == "+" else -1)
+
+
+def face_map(coords, facing="y-"):
+    """{column: cell} -- the voxel of `coords` nearest the `facing` viewer.
+
+    Columns run along the named axis and are the *other* two coordinates in
+    x, y, z order, so "y-" (`preview()`'s front) keys on `(x, z)` and "z-"
+    keys on `(x, y)` -- the same column convention as `occlusion()`.
+
+    This is the surface you drape things onto. Anything painted *at* a curved
+    surface -- eyes, a mouth, a belt buckle, lettering -- has to find the
+    surface per column, because a flat patch of one y sinks into the cheeks
+    at the edges and floats off the nose in the middle:
+
+        face = face_map(head, "y-")
+        ink = {face[c] for c in patch if c in face}
+
+    The values are whole cells, not just the depth, so the set of them is the
+    visible skin: `set(face_map(part, "z-").values())` is a part's lowest
+    layer, and unioning the values for "x-" and "x+" gives its two silhouette
+    edges -- the flanks a shade step has to stay off. Columns where `coords`
+    is empty are simply absent; `face.get(col)` is the honest way to read it.
+    """
+    ai, sign = _facing(facing)
+    out = {}
+    for c in coords:
+        col = c[:ai] + c[ai + 1:]
+        w = out.get(col)
+        if w is None or sign * c[ai] > sign * w[ai]:
+            out[col] = c
+    return out
+
+
+def _plane_components(cells):
+    """Connected components of a set of 2-D cells, 4-connected."""
+    todo = set(cells)
+    while todo:
+        seed = todo.pop()
+        comp, stack = {seed}, [seed]
+        while stack:
+            u, v = stack.pop()
+            for n in ((u + 1, v), (u - 1, v), (u, v + 1), (u, v - 1)):
+                if n in todo:
+                    todo.discard(n)
+                    comp.add(n)
+                    stack.append(n)
+        yield comp
+
+
+def round_slices(coords, axis="z"):
+    """Refit every slice's connected components to ellipses.
+
+    A `silhouette_hull` of a front and a side mask is a product of spans, so
+    each of its slices is a rectangle and the solid has square cross-sections
+    -- a head that is round from the front and boxy from above. This carves
+    each slice back to the ellipse inscribed in its own bounding box, which
+    is what makes a hull read as turned rather than as extruded. It only ever
+    removes cells; nothing is added, so a shape stays inside its silhouette.
+
+    Fitting per *component* rather than per slice is the whole trick: a slice
+    through two legs is two rectangles, and one ellipse spanning both would
+    eat their outer halves and leave a lens between them.
+
+    `axis` names the direction the slices stack along, so a figure built
+    lying down is rounded with "x" or "y".
+    """
+    ai = "xyz".index(axis)
+    iu, iv = [i for i in range(3) if i != ai]
+    by_slice = {}
+    for c in coords:
+        by_slice.setdefault(c[ai], set()).add((c[iu], c[iv]))
+    out = set()
+    for w, plane in by_slice.items():
+        for comp in _plane_components(plane):
+            us = [c[0] for c in comp]
+            vs = [c[1] for c in comp]
+            cu, cv = (min(us) + max(us)) / 2, (min(vs) + max(vs)) / 2
+            ru = (max(us) - min(us)) / 2 + 0.5
+            rv = (max(vs) - min(vs)) / 2 + 0.5
+            for u, v in comp:
+                if ((u - cu) / ru) ** 2 + ((v - cv) / rv) ** 2 <= 1.0:
+                    cell = [0, 0, 0]
+                    cell[ai], cell[iu], cell[iv] = w, u, v
+                    out.add(tuple(cell))
+    return out
+
+
 def _flood(coords, seed):
     """Face-adjacent flood fill over `coords`, starting at `seed`."""
     seen = {seed}
@@ -1760,14 +1852,58 @@ class Model:
             dirs = [(1, 0, 0), (-1, 0, 0), (0, 1, 0),
                     (0, -1, 0), (0, 0, 1), (0, 0, -1)]
         else:
-            if len(facing) != 2 or facing[0] not in "xyz" or facing[1] not in "+-":
-                raise ValueError(f"bad facing {facing!r}; want e.g. 'z+'")
+            ai, sign = _facing(facing)
             d = [0, 0, 0]
-            d["xyz".index(facing[0])] = 1 if facing[1] == "+" else -1
+            d[ai] = sign
             dirs = [tuple(d)]
         return {(x, y, z) for (x, y, z) in self.voxels
                 if any((x + dx, y + dy, z + dz) not in self.voxels
                        for dx, dy, dz in dirs)}
+
+    def undersides(self, coords=None, reach=2):
+        """Cells of `coords` whose surface genuinely looks down, for shading.
+
+        `surface("z-")` is the naive version of this and it is wrong on
+        anything that flares outward: every layer of an outward-sloping wall
+        overhangs the one below by a voxel, so "air directly underneath" is
+        true for the whole wall, and a shade step meant for the undersides
+        lands as a scatter down the front of it. That scatter is what made a
+        striped garment read as ragged denim.
+
+        A staircase step and a real overhang are told apart by two probes over
+        the disc of radius `reach` around the cell. A step-face is on a wall,
+        so it has air beside it in its **own** layer, and the wall carries on,
+        so something just inside it is filled in the layer **below**. An
+        overhang is missing one of the two: the underside of a slab has solid
+        all round it in its own layer, and the hem of a skirt has nothing
+        under it for `reach` in any direction.
+
+        `reach` is that radius in voxels. 2 is the useful default -- it passes
+        a wall stepping out a voxel or two per layer and stops at anything
+        steeper -- and `reach=0` degenerates to `surface("z-") & coords`.
+
+        `coords` defaults to the whole model; pass one part's cells to shade
+        that part in its own colour. Overhang is judged against the *whole*
+        model either way, so a face another part is pressed against is not an
+        underside, which keeps the step out of a joint nobody can see.
+        """
+        cells = self.voxels if coords is None else coords
+        r = int(reach)
+        probes = [(dx, dy)
+                  for dx in range(-r, r + 1) for dy in range(-r, r + 1)
+                  if 0 < dx * dx + dy * dy <= r * r]
+        out = set()
+        for c in cells:
+            x, y, z = c
+            if (x, y, z - 1) in self.voxels:
+                continue
+            on_wall = any((x + dx, y + dy, z) not in self.voxels
+                          for dx, dy in probes)
+            carries_on = any((x + dx, y + dy, z - 1) in self.voxels
+                             for dx, dy in probes)
+            if not (on_wall and carries_on):
+                out.add(c)
+        return out
 
     def support(self, coords, offset=(0, 0, -1)):
         """(supported, total) for `coords`: how many have a filled neighbor.
@@ -1811,11 +1947,7 @@ class Model:
         Pass every part at once and the ones that gained columns are the
         blockers.
         """
-        if (len(facing) != 2 or facing[0] not in "xyz"
-                or facing[1] not in "+-"):
-            raise ValueError(f"bad facing {facing!r}; want e.g. 'y-'")
-        ai = "xyz".index(facing[0])
-        sign = 1 if facing[1] == "+" else -1
+        ai, sign = _facing(facing)
 
         nearest = {}
         for c in self.voxels:

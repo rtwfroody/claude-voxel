@@ -59,6 +59,10 @@ Model()                       .voxel(pos,c) .box(a,b,c) .sphere(ctr,r,c)
                               .recolor(old,new) .center(axes) .copy()
   queries                     len() `in` .coords() .bounds .size .stats()
                               .color_histogram() .surface(facing) .support(coords)
+                              .undersides(coords=None, reach=2)  the cells that
+                              genuinely face down, judged against the whole
+                              model; surface("z-") calls a flaring wall's every
+                              step-face an underside and this does not
                               .occlusion(parts,facing)  {name:(visible,total)}
                               columns where the part is the frontmost voxel
                               .detached() .components()
@@ -91,6 +95,14 @@ transforms                    translate mirror rotate90 scale bounds components
                               distance_field(seeds,domain)  {cell:steps} by BFS
                               through the domain, 2D or 3D; a gradient away
                               from water / a wall / an edge
+                              round_slices(coords,axis="z")  refit each slice's
+                              components to ellipses -- what turns a boxy
+                              silhouette_hull round; per component, or a
+                              two-leg slice loses the legs' outer halves
+                              face_map(coords,facing="y-")  {column:cell}, the
+                              voxel nearest that viewer -- the surface to drape
+                              a decal onto, and set(...values()) is a part's
+                              lowest layer or its silhouette edge
 curves                        interp(knots,x)  linear over [(x,y),...], clamped
                               at both ends -- a measured profile table
                               smoothstep(t)    clamped cubic ease; the clamp is

@@ -9,11 +9,11 @@ import zlib
 
 from voxel import (GEAR_MODULE, MAX_DIM, Model, Palette, Scene, bounds,
                    bucket_by_cuts, bucket_by_shares, chroma, components,
-                   disc_average, distance_field, fbm3, interp, luma,
+                   disc_average, distance_field, face_map, fbm3, interp, luma,
                    match_histogram, mirror, noise3, parse_color, ramp_at,
-                   rank_normalize, relight, rotate90, scale, scale_color,
-                   shapes, share_fractions, smoothstep, to_hex, translate,
-                   weighted_quantiles, _main, _walk_chunks)
+                   rank_normalize, relight, rotate90, round_slices, scale,
+                   scale_color, shapes, share_fractions, smoothstep, to_hex,
+                   translate, weighted_quantiles, _main, _walk_chunks)
 
 
 def _tmp(name="t.vox"):
@@ -1967,6 +1967,201 @@ def test_occlusion_rejects_a_bad_facing():
             assert "facing" in str(e)
         else:
             raise AssertionError(f"{bad!r} should raise")
+
+
+# -- round_slices ----------------------------------------------------------
+
+def _one_ellipse_over_the_whole_slice(cells):
+    """The wrong way to do it: one fit per slice instead of per component."""
+    out = set()
+    by_z = {}
+    for x, y, z in cells:
+        by_z.setdefault(z, []).append((x, y))
+    for z, plane in by_z.items():
+        xs = [c[0] for c in plane]
+        ys = [c[1] for c in plane]
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        rx = (max(xs) - min(xs)) / 2 + 0.5
+        ry = (max(ys) - min(ys)) / 2 + 0.5
+        for x, y in plane:
+            if ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1.0:
+                out.add((x, y, z))
+    return out
+
+
+def test_round_slices_takes_the_corners_off_a_square_slice():
+    """A 5x5 slice becomes the inscribed ellipse: the four corners go."""
+    slab = shapes.box((-2, -2, 0), (2, 2, 0))
+    out = round_slices(slab)
+    assert len(slab) == 25 and len(out) == 21
+    assert slab - out == {(2, 2, 0), (2, -2, 0), (-2, 2, 0), (-2, -2, 0)}
+
+
+def test_round_slices_only_ever_removes():
+    hull = shapes.silhouette_hull(front=["####", "####", "####"],
+                                  side=["####", "####", "####"])
+    out = round_slices(hull)
+    assert out < hull
+
+
+def test_round_slices_fits_each_component_not_each_slice():
+    """The trap: one ellipse over a two-leg slice eats the legs' outer halves.
+
+    Run against the broken version as well as the right one -- a check that
+    only ever sees the fixed build proves nothing about what it catches.
+    """
+    legs = (shapes.box((-7, -2, 0), (-3, 2, 0))
+            | shapes.box((3, -2, 0), (7, 2, 0)))
+    out = round_slices(legs)
+    left = {c for c in out if c[0] < 0}
+    right = {c for c in out if c[0] > 0}
+    assert len(left) == len(right) == 21          # each leg rounded on its own
+    assert mirror(left, "x", at=0) == right
+
+    # One ellipse spanning both legs is wide and shallow, so it cuts the
+    # outer end off each leg and leaves a lens rather than two rounded posts.
+    naive = _one_ellipse_over_the_whole_slice(legs)
+    assert len(naive) == 34 < len(out)
+    for c in ((-7, 1, 0), (-7, -1, 0), (7, 1, 0), (7, -1, 0)):
+        assert c in out and c not in naive
+    assert mirror(left, "x", at=-5) == left       # each post is round...
+    naive_left = {c for c in naive if c[0] < 0}
+    assert mirror(naive_left, "x", at=-5) != naive_left      # ...this is not
+
+
+def test_round_slices_keeps_a_one_cell_component():
+    out = round_slices({(4, 4, 0), (0, 0, 0), (1, 0, 0)})
+    assert out == {(4, 4, 0), (0, 0, 0), (1, 0, 0)}
+
+
+def test_round_slices_axis_is_the_same_carve_turned():
+    """Rotating the shape and the axis together must commute."""
+    hull = shapes.silhouette_hull(front=["#####", "#####", "##.##"],
+                                  side=["#####", "#####", "#####"])
+    z = round_slices(hull, "z")
+    assert round_slices(rotate90(hull, "x", 1), "y") == rotate90(z, "x", 1)
+    assert round_slices(rotate90(hull, "y", 1), "x") == rotate90(z, "y", 1)
+
+
+# -- face_map --------------------------------------------------------------
+
+def test_face_map_keys_on_the_other_two_axes():
+    box = shapes.box((0, 0, 0), (2, 3, 4))
+    front = face_map(box, "y-")
+    assert set(front) == {(x, z) for x in range(3) for z in range(5)}
+    assert front[(1, 2)] == (1, 0, 2)             # the y = 0 face
+    low = face_map(box, "z-")
+    assert set(low) == {(x, y) for x in range(3) for y in range(4)}
+    assert low[(1, 2)] == (1, 2, 0)
+
+
+def test_face_map_takes_the_nearest_voxel_from_each_side():
+    box = shapes.box((0, 0, 0), (2, 3, 4))
+    assert face_map(box, "y+")[(1, 2)] == (1, 3, 2)
+    assert face_map(box, "x-")[(2, 3)] == (0, 2, 3)
+    assert face_map(box, "x+")[(2, 3)] == (2, 2, 3)
+
+
+def test_face_map_follows_a_curved_surface():
+    """The point of it: a decal painted at one flat y sinks in at the edges."""
+    ball = shapes.sphere((0, 0, 0), 8)
+    front = face_map(ball, "y-")
+    assert front[(0, 0)][1] < front[(6, 0)][1]    # the middle stands proud
+    assert all(c in ball for c in front.values())
+
+
+def test_face_map_leaves_an_empty_column_out():
+    pillar = shapes.box((0, 0, 0), (2, 0, 2)) - {(1, 0, 1)}
+    front = face_map(pillar, "y-")
+    assert (1, 1) not in front
+    assert front.get((1, 1)) is None
+
+
+def test_face_map_gives_the_lateral_silhouette_edges():
+    ball = shapes.sphere((0, 0, 0), 5)
+    rim = (set(face_map(ball, "x-").values())
+           | set(face_map(ball, "x+").values()))
+    assert rim <= ball
+    assert mirror(rim, "x", at=0) == rim
+
+
+def test_face_map_rejects_a_bad_facing():
+    for bad in ("front", "y", "w-", "y*"):
+        try:
+            face_map(shapes.box((0, 0, 0), (1, 1, 1)), bad)
+        except ValueError as e:
+            assert "facing" in str(e)
+        else:
+            raise AssertionError(f"{bad!r} should raise")
+
+
+# -- undersides ------------------------------------------------------------
+
+def test_undersides_ignores_the_step_faces_of_an_outward_flare():
+    """The bug this exists for, run against the naive test that had it.
+
+    Every layer of a flaring cone overhangs the one below, so `surface("z-")`
+    calls the entire lateral wall an underside and a shade step lands as a
+    scatter down the front of it.
+    """
+    cone = shapes.frustum((0, 0, 0), 4, 20, top_radius=12)
+    m = Model()
+    m.add(cone, "grey")
+    floor = {c for c in cone if c[2] == 0}
+    assert m.undersides() == floor
+    naive = m.surface("z-")
+    assert len(naive - floor) > 300                # what the naive test shades
+
+
+def test_undersides_finds_a_real_overhang():
+    """A cap on a narrower stalk: its whole bottom ring genuinely faces down."""
+    stalk = shapes.cylinder((0, 0, 0), 3, 10)
+    cap = shapes.cylinder((0, 0, 10), 8, 2)
+    m = Model()
+    m.add(stalk | cap, "grey")
+    ring = {c for c in cap if c[2] == 10 and (c[0], c[1], 9) not in stalk}
+    assert m.undersides(cap) == ring
+    assert len(ring) > 100
+
+
+def test_undersides_is_a_subset_of_the_naive_test():
+    m = Model()
+    m.add(shapes.sphere((0, 0, 0), 9), "grey")
+    m.add(shapes.frustum((0, 0, -20), 3, 21, top_radius=8), "red")
+    assert m.undersides() < m.surface("z-")
+
+
+def test_undersides_reach_zero_is_the_naive_test():
+    m = Model()
+    m.add(shapes.frustum((0, 0, 0), 4, 20, top_radius=12), "grey")
+    assert m.undersides(reach=0) == m.surface("z-")
+
+
+def test_undersides_skips_a_face_another_part_is_pressed_against():
+    """Judged against the whole model, so a hidden joint gets no shade."""
+    post = shapes.box((-2, -2, 0), (2, 2, 9))
+    slab = shapes.box((-6, -6, 10), (6, 6, 11))
+    m = Model()
+    m.add(post, "grey")
+    m.add(slab, "red")
+    under = m.undersides(slab)
+    assert not any((x, y, 9) in post for x, y, z in under)
+    assert under == {c for c in slab if c[2] == 10} - {
+        (x, y, 10) for x, y, z in post if z == 9}
+
+
+def test_undersides_of_something_sitting_on_the_ground_is_empty():
+    m = Model()
+    m.add(shapes.box((-9, -9, -1), (9, 9, -1)), "green")     # ground
+    box = shapes.box((-4, -4, 0), (4, 4, 3))
+    m.add(box, "red")
+    assert m.undersides(box) == set()
+
+
+def test_undersides_defaults_to_the_whole_model():
+    m = Model()
+    m.add(shapes.box((0, 0, 0), (3, 3, 3)), "grey")
+    assert m.undersides() == m.undersides(m.coords())
 
 
 # -- runner ----------------------------------------------------------------

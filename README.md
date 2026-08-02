@@ -130,8 +130,9 @@ m.add(shapes.where((-20, -20, 0), (20, 20, 0),
 ```
 
 Transforms and queries on coordinate sets: `translate mirror rotate90 scale
-bounds components` — `components(coords)` checks a generated shape for having
-come apart before it is ever painted, which is where it is cheapest to catch. The
+bounds components round_slices face_map` — `components(coords)` checks a
+generated shape for having come apart before it is ever painted, which is where
+it is cheapest to catch. The
 model carries its own colored versions — `m.translate() m.rotate90() m.scale()
 m.mirror() m.center()` — so you can build a part once and orient copies of it:
 
@@ -150,6 +151,42 @@ one direction, for skinning a solid shape:
 m.add(m.surface("z+"), "light_grey")    # top-lit highlight
 m.add(m.surface("z-"), "dark_grey")     # underside shadow
 ```
+
+That second one is only honest on a shape whose walls are vertical or lean
+inward. Anything that flares outward overhangs the layer below at every step,
+so `surface("z-")` calls its whole wall an underside and the shade lands as a
+scatter down the front of it — which is how a striped garment came to read as
+ragged denim. `m.undersides()` is the same query with the step-faces removed:
+
+```python
+m.add(m.undersides(braies), STRIPE_SHADE)   # hems and overhangs, not the wall
+```
+
+It keeps a cell when the layer below is empty *and* the wall does not simply
+carry on: a step-face is on a wall, so it has air beside it in its own layer
+and something filled just inside it one layer down, while the underside of a
+slab has solid all round it in its own layer and the hem of a skirt has
+nothing under it at all. `reach` (default 2) is the radius of both probes in
+voxels — it passes a wall stepping out a voxel or two per layer and stops at
+anything steeper — and `reach=0` degenerates to `surface("z-")`. Overhang is
+judged against the whole model, so a face another part is pressed against gets
+no shade.
+
+`surface()` answers "which voxels are exposed". To paint something *at* a
+particular place on a surface — eyes, a mouth, a belt buckle, lettering —
+you need the surface per column, which is `face_map(coords, facing)`:
+
+```python
+face = face_map(head, "y-")                      # columns are (x, z)
+m.add({face[c] for c in eye_patch if c in face}, "ink")
+```
+
+A patch painted at one flat y sinks into the cheeks at the edges and floats
+off the nose in the middle; this follows the curve. Columns where `coords` is
+empty are absent, and the values are whole cells, so
+`set(face_map(part, "z-").values())` is a part's lowest layer and
+`set(face_map(part, "x-").values()) | set(face_map(part, "x+").values())` its
+two silhouette edges — the flanks a shade step has to stay off.
 
 **3. ASCII layers.** One string per Z layer, bottom first. Within a layer the
 first text row is the **highest Y**, so each layer reads as a top-down plan:
@@ -356,6 +393,22 @@ Two masks are the minimum; one on its own leaves an axis unbounded. Views that
 pin the same extent (front and top both give x) must agree on it or it raises.
 The result is the *largest* solid matching every drawing, so an interior drawn
 hollow in two views leaves only the corners where the two fills overlap.
+
+A two-mask hull is a product of spans, so every slice of it is a rectangle: a
+head drawn round from the front and round from the side is still square seen
+from above. `round_slices` carves each slice back to the ellipse inscribed in
+its own bounding box, which is what makes the solid read as turned rather than
+as extruded.
+
+```python
+mass = round_slices(shapes.silhouette_hull(front=front, side=side))
+```
+
+It fits each connected *component* of a slice rather than the slice: a slice
+through two legs is two rectangles, and one ellipse spanning both eats their
+outer halves and leaves a lens. It only ever removes cells, so the result
+stays inside the silhouette you drew, and `axis=` slices about x or y instead
+for something built lying down.
 
 ## Symmetry
 
